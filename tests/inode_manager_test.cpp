@@ -34,6 +34,7 @@ protected:
 
     void TearDown() override {
         std::filesystem::remove(TEST_IMG_PATH);
+        std::filesystem::remove("./test_imgs");
     }
 };
 
