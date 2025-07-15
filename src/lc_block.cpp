@@ -17,12 +17,12 @@ void block_write(LCBlock *block, const void *data, size_t size, size_t offset) {
     memcpy(block->data + offset, data, size);
 }
 
-void *block_as(LCBlock *block) {
+uint8_t *block_as(LCBlock *block) {
     LC_ASSERT(block != nullptr, "Block pointer is null");
-    return (void *)block->data;
+    return (uint8_t *)block->data;
 }
 
-const void *block_as_const(const LCBlock *block) {
+const uint8_t *block_as_const(const LCBlock *block) {
     LC_ASSERT(block != nullptr, "Block pointer is null");
-    return (const void *)block->data;
+    return (const uint8_t *)block->data;
 }

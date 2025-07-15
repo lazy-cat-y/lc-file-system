@@ -49,10 +49,10 @@ TEST_F(LCInodeBitmapTest, ReadInodeBitmapCorrectly) {
 }
 
 TEST_F(LCInodeBitmapTest, BitmapEdgeWriteAndReadBack) {
-    auto           bm = std::make_shared<LCBlockManager>(TEST_IMG_PATH);
-    LCInodeManager im(bm);
+    auto bm = std::make_shared<LCBlockManager>(TEST_IMG_PATH);
 
     {
+        LCInodeManager im(bm);
         LCInodeManagerTestAccess::read_inode_bitmap(im);
         uint8_t       *bitmap = LCInodeManagerTestAccess::get_inode_bitmap(im);
         const uint32_t inode_count = bm->get_header()->inode_count;

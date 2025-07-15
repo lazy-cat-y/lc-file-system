@@ -23,9 +23,9 @@ void block_clear(LCBlock *block);
 void block_write(LCBlock *block, const void *data, size_t size,
                  size_t offset = 0);
 
-void *block_as(LCBlock *block);
+uint8_t *block_as(LCBlock *block);
 
-const void *block_as_const(const LCBlock *block);
+const uint8_t *block_as_const(const LCBlock *block);
 
 
 struct LCBlockHeader {

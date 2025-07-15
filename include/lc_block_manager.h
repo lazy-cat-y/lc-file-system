@@ -11,6 +11,7 @@
 #include "lc_block.h"
 #include "lc_configs.h"
 #include "lc_exception.h"
+#include "lc_utils.h"
 
 LC_NAMESPACE_BEGIN
 LC_FILESYSTEM_NAMESPACE_BEGIN
@@ -81,29 +82,36 @@ public:
         uint32_t total_blocks = total_size_bytes / DEFAULT_BLOCK_SIZE;
         uint32_t inode_count  = total_size_bytes / bytes_per_inode;
         uint32_t inode_block_count =
-            (inode_count * sizeof(LCBlockHeader) + DEFAULT_BLOCK_SIZE - 1) /
-            DEFAULT_BLOCK_SIZE;
+            ceil_divide_int32_t(inode_count * sizeof(LCBlockHeader),
+                                DEFAULT_BLOCK_SIZE);
+        // (inode_count * sizeof(LCBlockHeader) + DEFAULT_BLOCK_SIZE - 1) /
+        // DEFAULT_BLOCK_SIZE;
 
-        uint32_t block_bitmap_size = (total_blocks) / 8 + 
-                                      ((total_blocks % 8) ? 1 : 0);
+        uint32_t block_bitmap_size =
+            ceil_divide_int32_t(total_blocks, 8);  // 1 bit per block
+        // (total_blocks) / 8 + ((total_blocks % 8) ? 1 : 0);
         uint32_t block_bitmap_block_count =
-                        (block_bitmap_size) / DEFAULT_BLOCK_SIZE +
-                        ((block_bitmap_size % DEFAULT_BLOCK_SIZE) ? 1 : 0);
-        uint32_t inode_bitmap_size = (inode_count) / 8 +
-                                     ((inode_count % 8) ? 1 : 0);
+            ceil_divide_int32_t(block_bitmap_size, DEFAULT_BLOCK_SIZE);
+        // (block_bitmap_size) / DEFAULT_BLOCK_SIZE +
+        // ((block_bitmap_size % DEFAULT_BLOCK_SIZE) ? 1 : 0);
+        uint32_t inode_bitmap_size =
+            ceil_divide_int32_t(inode_count, 8);  // 1 bit per inode
+        // (inode_count) / 8 + ((inode_count % 8) ? 1 : 0);
         uint32_t inode_bitmap_block_count =
-            (inode_bitmap_size) / DEFAULT_BLOCK_SIZE +
-            ((inode_bitmap_size % DEFAULT_BLOCK_SIZE) ? 1 : 0);
+            ceil_divide_int32_t(inode_bitmap_size, DEFAULT_BLOCK_SIZE);
+        // (inode_bitmap_size) / DEFAULT_BLOCK_SIZE +
+        // ((inode_bitmap_size % DEFAULT_BLOCK_SIZE) ? 1 : 0);
 
         LCBlockHeader header {};
         header.total_blocks       = total_blocks;
         header.inode_count        = inode_count;
         header.block_bitmap_start = 1;  // Usually starts at block 1
-        header.inode_bitmap_start = header.block_bitmap_start + 
-                                    block_bitmap_block_count;
-        header.inode_start        = header.inode_bitmap_start + inode_bitmap_block_count;
-        header.inode_block_count  = inode_block_count;
-        header.data_start         = header.inode_start + inode_block_count;
+        header.inode_bitmap_start =
+            header.block_bitmap_start + block_bitmap_block_count;
+        header.inode_start =
+            header.inode_bitmap_start + inode_bitmap_block_count;
+        header.inode_block_count = inode_block_count;
+        header.data_start        = header.inode_start + inode_block_count;
 
         LCBlock header_block {};
         block_clear(&header_block);

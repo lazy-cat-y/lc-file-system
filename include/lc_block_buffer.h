@@ -1,0 +1,299 @@
+#ifndef LC_BLOCK_BUFFER_H
+#define LC_BLOCK_BUFFER_H
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <condition_variable>
+#include <cstdint>
+#include <mutex>
+#include <thread>
+#include <unordered_map>
+
+#include "lc_block.h"
+#include "lc_block_manager.h"
+#include "lc_configs.h"
+
+LC_NAMESPACE_BEGIN
+LC_FILESYSTEM_NAMESPACE_BEGIN
+
+typedef struct LCBlockBufferPoolFrame {
+    bool     valid;        // Indicates if the frame is valid
+    bool     dirty;        // Indicates if the frame has been modified
+    uint8_t  ref_count;    // Reference count for the frame
+    uint8_t  usage_count;  // Usage count for the frame, used for LRU
+    uint32_t block_id;     // The ID of the block this frame holds
+    LCBlock  block;        // The block data
+} LCBlockBufferPoolFrame;
+
+inline uint8_t add_usage_count(uint8_t usage_count) {
+    return std::min<uint8_t>(usage_count + 1, static_cast<uint8_t>(5));
+}
+
+class LCBlockBufferPool {
+public:
+
+    LCBlockBufferPool()  = delete;
+    ~LCBlockBufferPool() = default;
+
+    LCBlockBufferPool(const LCBlockBufferPool &)            = delete;
+    LCBlockBufferPool &operator=(const LCBlockBufferPool &) = delete;
+    LCBlockBufferPool(LCBlockBufferPool &&)                 = delete;
+    LCBlockBufferPool &operator=(LCBlockBufferPool &&)      = delete;
+
+    explicit LCBlockBufferPool(LCBlockManager *block_manager,
+                               uint32_t pool_size, uint32_t frame_interval_ms) :
+        block_manager_(block_manager),
+        frames_(new LCBlockBufferPoolFrame[pool_size]),
+        pool_size_(pool_size),
+        frame_interval_ms_(frame_interval_ms),
+        frame_locks_(new std::atomic_flag[pool_size]),
+        clock_hand_(0) {
+        for (uint32_t i = 0; i < pool_size; ++i) {
+            frame_locks_[i].clear();
+        }
+    }
+
+    void start() {
+        bool expected = false;
+        if (running_.compare_exchange_strong(expected, true)) {
+            background_thread_ =
+                std::thread(&LCBlockBufferPool::background_flush_loop, this);
+        }
+    }
+
+    void stop() {
+        bool expected = true;
+        if (running_.compare_exchange_strong(expected, false)) {
+            cv_.notify_all();
+            if (background_thread_.joinable()) {
+                background_thread_.join();
+            }
+            flush_all();
+        }
+    }
+
+    /*
+     * read_block()
+     * │─ lock mutex →
+     * │   └─ check if block_id exists in frame_map_ →
+     * │       ├─ if exists: get frame_index
+     * │       └─ if not: find_or_allocate_frame(block_id) → insert into
+     * frame_map_ ├─ unlock mutex   // can be packed with a new function └─ lock
+     * frame_spinlock[frame_index] → │ ref_count++ → └─ return
+     * frames_[frame_index].block.
+     */
+    LCBlock read_block(uint32_t block_id) {
+        uint32_t frame_index = find_frame(block_id);
+        {
+            FrameSpinLock lock(frame_locks_[frame_index]);
+            auto         &frame = frames_[frame_index];
+            frame.ref_count++;
+            frame.usage_count = add_usage_count(frame.usage_count);
+            return frame.block;
+        }
+    }
+
+    /*
+     * write_block()
+     * find_frame(block_id)
+     * └─ lock frame_spinlock[frame_index] → write block data →
+     * mark frame dirty → update frame_map_ with block_id and frame_index
+     * └─ return
+     */
+    void write_block(uint32_t block_id, const LCBlock &block) {
+        uint32_t frame_index = find_frame(block_id);
+        {
+            FrameSpinLock lock(frame_locks_[frame_index]);
+            auto         &frame = frames_[frame_index];
+            frame.dirty         = true;
+            frame.block         = block;
+            frame.usage_count   = add_usage_count(frame.usage_count);
+        }
+    }
+
+    void unpin_block(uint32_t block_id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto                        it = frame_map_.find(block_id);
+        LC_ASSERT(it != frame_map_.end(), "Block ID not found");
+        if (it != frame_map_.end()) {
+            uint32_t      frame_index = it->second;
+            FrameSpinLock lock(frame_locks_[frame_index]);
+            auto         &frame = frames_[frame_index];
+            if (frame.ref_count > 0) {
+                frame.ref_count--;
+            }
+        }
+    }
+
+    void flush_block(uint32_t block_id) {
+        uint32_t frame_index = -1;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto                        it = frame_map_.find(block_id);
+            if (it != frame_map_.end()) {
+                frame_index = it->second;
+            }
+        }
+        LC_ASSERT(frame_index != -1, "Frame index not found for block ID");
+        {
+            FrameSpinLock lock(frame_locks_[frame_index]);
+            auto         &frame = frames_[frame_index];
+
+            if (frame.dirty) {
+                block_manager_->write_block(frame.block_id, frame.block);
+                frame.dirty = false;
+            }
+        }
+    }
+
+    void flush_all() {
+        for (uint32_t i = 0; i < pool_size_; ++i) {
+            FrameSpinLock lock(frame_locks_[i]);
+            auto         &frame = frames_[i];
+            if (frame.valid && frame.dirty) {
+                block_manager_->write_block(frame.block_id, frame.block);
+                frame.dirty = false;
+            }
+        }
+    }
+
+private:
+
+    class FrameSpinLock {
+    public:
+        LC_EXPLICIT FrameSpinLock(std::atomic_flag &flag) : flag_(flag) {
+            while (flag_.test_and_set(std::memory_order_acquire)) {}
+        }
+
+        ~FrameSpinLock() {
+            flag_.clear(std::memory_order_release);
+        }
+
+        FrameSpinLock(const FrameSpinLock &)            = delete;
+        FrameSpinLock &operator=(const FrameSpinLock &) = delete;
+        FrameSpinLock(FrameSpinLock &&)                 = delete;
+        FrameSpinLock &operator=(FrameSpinLock &&)      = delete;
+
+    private:
+        std::atomic_flag &flag_;
+    };
+
+    /*
+     * find_frame()
+     * └─ lock mutex →
+     *     └─ check if block_id exists in frame_map_ →
+     *         ├─ if exists: get frame_index
+     *         └─ if not: find_or_allocate_frame(block_id) → insert into
+     * ├─ unlock mutex
+     * └─ return frame_index
+     */
+    uint32_t find_frame(uint32_t block_id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        uint32_t                    frame_index = -1;
+        auto                        it          = frame_map_.find(block_id);
+        if (it != frame_map_.end()) {
+            frame_index = it->second;
+        } else {
+            // read block from disk
+            frame_index = find_or_allocate_frame(block_id);
+        }
+        LC_ASSERT(frame_index != -1, "Frame index not found for block ID");
+        return frame_index;
+    }
+
+    // Find or allocate a frame for given block_index
+    uint32_t find_or_allocate_frame(uint32_t block_index) {
+        uint32_t frame_index = evict_frame();
+        {
+            FrameSpinLock lock(frame_locks_[frame_index]);
+            auto         &frame = frames_[frame_index];
+            frame.valid         = true;
+            frame.dirty         = false;
+            frame.block_id      = block_index;
+            block_manager_->read_block(block_index, frame.block);
+            frame.ref_count   = 0;
+            frame.usage_count = 1;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        frame_map_[block_index] = frame_index;
+        return frame_index;
+    }
+
+    // Clock sweep to find a reusable frame
+    uint32_t evict_frame() {
+        uint32_t frame_index = clock_hand_.load(std::memory_order_relaxed);
+        while (true) {
+            if (frame_index >= pool_size_) {
+                frame_index = 0;
+            }
+            {
+                FrameSpinLock lock(frame_locks_[frame_index]);
+                auto         &frame = frames_[frame_index];
+                if (!frame.valid ||
+                    (frame.ref_count == 0 && frame.usage_count == 0)) {
+                    if (frame.valid && frame.dirty) {
+                        // If the frame is dirty, flush it to disk
+                        block_manager_->write_block(frame.block_id,
+                                                    frame.block);
+                    }
+
+                    frame.valid = false;
+                    frame.dirty = false;
+
+                    clock_hand_.store((frame_index + 1) % pool_size_,
+                                      std::memory_order_relaxed);
+                    return frame_index;
+                }
+                if (frame.ref_count == 0 && frame.usage_count > 0) {
+                    frame.usage_count--;
+                }
+            }
+            ++frame_index;
+        }
+
+        // Should never reach here
+        LC_ASSERT(false, "No reusable frame found, this should not happen");
+        return -1;
+    }
+
+    // Background flush logic
+    void background_flush_loop() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        while (running_) {
+            // condition variable will release the lock while waiting
+            if (cv_.wait_for(lock,
+                             std::chrono::milliseconds(frame_interval_ms_),
+                             [this]() { return !running_; })) {
+                break;
+            }
+            lock.unlock();
+            flush_all();
+            lock.lock();
+        }
+    }
+
+    LCBlockManager         *block_manager_;
+    LCBlockBufferPoolFrame *frames_;
+    uint32_t                pool_size_;
+    uint32_t                frame_interval_ms_;
+    std::unordered_map<uint32_t, uint32_t>
+        frame_map_;   // Maps block_id to frame index
+
+    std::atomic<uint32_t>
+        clock_hand_;  // For clock algorithm, store the index of the next
+                      // frame to check, this should be atomic
+
+    // Concurrency
+    std::mutex              mutex_;
+    std::condition_variable cv_;           // Condition variable for signaling
+    std::thread             background_thread_;
+    std::atomic<bool>       running_ {false};
+    std::atomic_flag       *frame_locks_;  // Spin locks for each frame
+};
+
+LC_FILESYSTEM_NAMESPACE_END
+LC_NAMESPACE_END
+
+#endif  // LC_BLOCK_BUFFER_H
