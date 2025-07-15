@@ -17,6 +17,9 @@
 LC_NAMESPACE_BEGIN
 LC_FILESYSTEM_NAMESPACE_BEGIN
 
+// TODO: change read and write methods to use LCBlockBufferPool
+// TODO: add caching mechanism for frequently accessed inodes
+
 class LCInodeManager {
 #if defined(DEBUG) || defined(_DEBUG)
     static_assert(sizeof(LCInode) == LC_INODE_SIZE, "LCInode size mismatch");
@@ -47,8 +50,8 @@ public:
             blockManager_->get_header()->inode_count;
         uint32_t inode_bitmap_size =
             ceil_divide_int32_t(inode_cache_info_.inode_count, 8);
-            // (inode_cache_info_.inode_count) / 8 +
-            // ((inode_cache_info_.inode_count % 8) ? 1 : 0);
+        // (inode_cache_info_.inode_count) / 8 +
+        // ((inode_cache_info_.inode_count % 8) ? 1 : 0);
         inode_cache_info_.inode_bitmap_block_count =
             (blockManager_->get_header()->inode_start -
              blockManager_->get_header()->inode_bitmap_start);
@@ -108,7 +111,7 @@ public:
         } else {
             truncate_inode(inode, 0);  // Free blocks and clear metadata
             clear_inode_bitmap_bit(ino);
-            write_inode(ino, inode);  // Write updated inode
+            write_inode(ino, inode);   // Write updated inode
         }
     }
 
@@ -126,27 +129,27 @@ public:
     LCInode load_inode(uint32_t ino) {
         LC_ASSERT(ino < inode_cache_info_.inode_count,
                   "Inode number out of range");
-        LCInode inode {};
+        LCInode  inode {};
         uint32_t block_index = ino / LC_INODES_PRE_BLOCK;
         uint32_t offset      = (ino % LC_INODES_PRE_BLOCK) * LC_INODE_SIZE;
-        LCBlock inode_block {};
+        LCBlock  inode_block {};
         blockManager_->read_block(block_index, inode_block);
         memcpy(&inode, block_as(&inode_block) + offset, sizeof(LCInode));
         return inode;
     }
 
-    /*  
+    /*
      * write_inode():
      * └─ load_inode() → update inode metadata → write to the block manager
      * If we have a caching mechanism, we would update the cache, but when
      * should we write to disk? Every time we update the inode?
-    */
+     */
     void write_inode(uint32_t ino, const LCInode &inode) {
         LC_ASSERT(ino < inode_cache_info_.inode_count,
                   "Inode number out of range");
         uint32_t block_index = ino / LC_INODES_PRE_BLOCK;
         uint32_t offset      = (ino % LC_INODES_PRE_BLOCK) * LC_INODE_SIZE;
-        LCBlock inode_block {};
+        LCBlock  inode_block {};
         blockManager_->read_block(block_index, inode_block);
         memcpy(block_as(&inode_block) + offset, &inode, sizeof(LCInode));
         blockManager_->write_block(block_index, inode_block);

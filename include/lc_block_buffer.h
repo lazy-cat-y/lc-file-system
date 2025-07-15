@@ -4,10 +4,14 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <clocale>
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
+#include <cstring>
+#include <iostream>
 #include <mutex>
+#include <shared_mutex>
 #include <thread>
 #include <unordered_map>
 
@@ -17,6 +21,8 @@
 
 LC_NAMESPACE_BEGIN
 LC_FILESYSTEM_NAMESPACE_BEGIN
+
+#define LC_BLOCK_ILLEGAL_ID 0xFFFFFFFF
 
 typedef struct LCBlockBufferPoolFrame {
     bool     valid;        // Indicates if the frame is valid
@@ -34,8 +40,12 @@ inline uint8_t add_usage_count(uint8_t usage_count) {
 class LCBlockBufferPool {
 public:
 
-    LCBlockBufferPool()  = delete;
-    ~LCBlockBufferPool() = default;
+    LCBlockBufferPool() = delete;
+
+    ~LCBlockBufferPool() {
+        LC_ASSERT(!running_.load(), "Cannot destruct while running");
+        free_resources();
+    }
 
     LCBlockBufferPool(const LCBlockBufferPool &)            = delete;
     LCBlockBufferPool &operator=(const LCBlockBufferPool &) = delete;
@@ -52,6 +62,14 @@ public:
         clock_hand_(0) {
         for (uint32_t i = 0; i < pool_size; ++i) {
             frame_locks_[i].clear();
+        }
+        for (uint32_t i = 0; i < pool_size; ++i) {
+            frames_[i].valid       = false;
+            frames_[i].dirty       = false;
+            frames_[i].ref_count   = 0;
+            frames_[i].usage_count = 0;
+            frames_[i].block_id    = LC_BLOCK_ILLEGAL_ID;
+            block_clear(&frames_[i].block);
         }
     }
 
@@ -85,14 +103,22 @@ public:
      * frames_[frame_index].block.
      */
     LCBlock read_block(uint32_t block_id) {
-        uint32_t frame_index = find_frame(block_id);
-        {
-            FrameSpinLock lock(frame_locks_[frame_index]);
-            auto         &frame = frames_[frame_index];
-            frame.ref_count++;
-            frame.usage_count = add_usage_count(frame.usage_count);
-            return frame.block;
+        while (true) {
+            uint32_t frame_index = find_frame(block_id);
+            {
+                FrameSpinLock lock(frame_locks_[frame_index]);
+                auto         &frame = frames_[frame_index];
+
+                if (!frame.valid || frame.block_id != block_id) {
+                    continue;
+                }
+                frame.ref_count++;
+                frame.usage_count = add_usage_count(frame.usage_count);
+                return frame.block;
+            }
         }
+        LC_ASSERT(false, "Block ID not found, this should not happen");
+        return LCBlock();  // Should never reach here, but return empty block
     }
 
     /*
@@ -103,25 +129,47 @@ public:
      * └─ return
      */
     void write_block(uint32_t block_id, const LCBlock &block) {
-        uint32_t frame_index = find_frame(block_id);
-        {
-            FrameSpinLock lock(frame_locks_[frame_index]);
-            auto         &frame = frames_[frame_index];
-            frame.dirty         = true;
-            frame.block         = block;
-            frame.usage_count   = add_usage_count(frame.usage_count);
+#if defined(DEBUG)
+        int retry = 0;
+#endif
+        while (true) {
+            uint32_t frame_index = find_frame(block_id);
+            {
+                FrameSpinLock lock(frame_locks_[frame_index]);
+                auto         &frame = frames_[frame_index];
+#if defined(DEBUG)
+                if (retry++ > 10000) {
+                    std::cerr << "write_block retry block_id=" << block_id
+                              << " got frame.block_id=" << frame.block_id
+                              << std::endl;
+                    LC_ASSERT(false, "Too many retries in write_block");
+                }
+#endif
+
+                if (!frame.valid || frame.block_id != block_id) {
+                    continue;  // Retry if the frame is not valid or does not
+                               // match
+                }
+                memcpy(&frame.block, &block, DEFAULT_BLOCK_SIZE);
+                frame.dirty       = true;
+                frame.usage_count = add_usage_count(frame.usage_count);
+                return;
+            }
         }
+        LC_ASSERT(false, "Block ID not found, this should not happen");
+        // Should never reach here
     }
 
     void unpin_block(uint32_t block_id) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto                        it = frame_map_.find(block_id);
+        std::shared_lock<std::shared_mutex> shared_lock(frame_map_mutex_);
+        auto                                it = frame_map_.find(block_id);
         LC_ASSERT(it != frame_map_.end(), "Block ID not found");
         if (it != frame_map_.end()) {
             uint32_t      frame_index = it->second;
             FrameSpinLock lock(frame_locks_[frame_index]);
             auto         &frame = frames_[frame_index];
-            if (frame.ref_count > 0) {
+            if (frame.valid && frame.block_id == block_id &&
+                frame.ref_count > 0) {
                 frame.ref_count--;
             }
         }
@@ -130,18 +178,20 @@ public:
     void flush_block(uint32_t block_id) {
         uint32_t frame_index = -1;
         {
-            std::lock_guard<std::mutex> lock(mutex_);
-            auto                        it = frame_map_.find(block_id);
+            std::shared_lock<std::shared_mutex> shared_lock(frame_map_mutex_);
+            auto                                it = frame_map_.find(block_id);
             if (it != frame_map_.end()) {
                 frame_index = it->second;
             }
         }
+
         LC_ASSERT(frame_index != -1, "Frame index not found for block ID");
+
         {
             FrameSpinLock lock(frame_locks_[frame_index]);
             auto         &frame = frames_[frame_index];
 
-            if (frame.dirty) {
+            if (frame.valid && frame.block_id == block_id && frame.dirty) {
                 block_manager_->write_block(frame.block_id, frame.block);
                 frame.dirty = false;
             }
@@ -190,67 +240,72 @@ private:
      * └─ return frame_index
      */
     uint32_t find_frame(uint32_t block_id) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        uint32_t                    frame_index = -1;
-        auto                        it          = frame_map_.find(block_id);
+        {
+            std::shared_lock<std::shared_mutex> shared_lock(frame_map_mutex_);
+
+            auto it = frame_map_.find(block_id);
+            if (it != frame_map_.end()) {
+                return it->second;
+            }
+        }
+
+        std::unique_lock<std::shared_mutex> write(frame_map_mutex_);
+
+        auto it = frame_map_.find(block_id);
         if (it != frame_map_.end()) {
-            frame_index = it->second;
-        } else {
-            // read block from disk
-            frame_index = find_or_allocate_frame(block_id);
+            // If the block is already in the map, return its index
+            return it->second;
+        }
+
+        uint32_t frame_index = evict_frame();
+        {
+            FrameSpinLock lock(frame_locks_[frame_index]);
+            auto         &frame = frames_[frame_index];
+
+            if (frame.valid && frame.block_id != block_id) {
+                return find_frame(block_id);  // retry from top
+            }
+
+            if (frame.block_id != LC_BLOCK_ILLEGAL_ID) {
+                frame_map_.erase(frame.block_id);
+            }
+
+            frame.block_id = block_id;
+            frame.dirty    = false;
+            block_manager_->read_block(block_id, frame.block);
+            frame.ref_count      = 0;
+            frame.usage_count    = 1;
+            frame_map_[block_id] = frame_index;
+            frame.valid          = true;
         }
         LC_ASSERT(frame_index != -1, "Frame index not found for block ID");
         return frame_index;
     }
 
-    // Find or allocate a frame for given block_index
-    uint32_t find_or_allocate_frame(uint32_t block_index) {
-        uint32_t frame_index = evict_frame();
-        {
-            FrameSpinLock lock(frame_locks_[frame_index]);
-            auto         &frame = frames_[frame_index];
-            frame.valid         = true;
-            frame.dirty         = false;
-            frame.block_id      = block_index;
-            block_manager_->read_block(block_index, frame.block);
-            frame.ref_count   = 0;
-            frame.usage_count = 1;
-        }
-        std::lock_guard<std::mutex> lock(mutex_);
-        frame_map_[block_index] = frame_index;
-        return frame_index;
-    }
-
     // Clock sweep to find a reusable frame
     uint32_t evict_frame() {
-        uint32_t frame_index = clock_hand_.load(std::memory_order_relaxed);
         while (true) {
-            if (frame_index >= pool_size_) {
-                frame_index = 0;
-            }
-            {
-                FrameSpinLock lock(frame_locks_[frame_index]);
-                auto         &frame = frames_[frame_index];
-                if (!frame.valid ||
-                    (frame.ref_count == 0 && frame.usage_count == 0)) {
-                    if (frame.valid && frame.dirty) {
-                        // If the frame is dirty, flush it to disk
-                        block_manager_->write_block(frame.block_id,
-                                                    frame.block);
-                    }
+            uint32_t frame_index =
+                clock_hand_.fetch_add(1, std::memory_order_relaxed) %
+                pool_size_;
 
-                    frame.valid = false;
-                    frame.dirty = false;
+            FrameSpinLock lock(frame_locks_[frame_index]);
+            auto         &frame = frames_[frame_index];
+            if (!frame.valid ||
+                (frame.ref_count == 0 && frame.usage_count == 0)) {
+                if (frame.valid && frame.dirty) {
+                    // If the frame is dirty, flush it to disk
+                    block_manager_->write_block(frame.block_id, frame.block);
+                }
 
-                    clock_hand_.store((frame_index + 1) % pool_size_,
-                                      std::memory_order_relaxed);
-                    return frame_index;
-                }
-                if (frame.ref_count == 0 && frame.usage_count > 0) {
-                    frame.usage_count--;
-                }
+                frame.valid = false;
+                frame.dirty = false;
+
+                return frame_index;
             }
-            ++frame_index;
+            if (frame.ref_count == 0 && frame.usage_count > 0) {
+                frame.usage_count--;
+            }
         }
 
         // Should never reach here
@@ -268,9 +323,23 @@ private:
                              [this]() { return !running_; })) {
                 break;
             }
+#if defined(DEBUG)
+            std::cout << "Background flush loop running..." << std::endl;
+#endif
             lock.unlock();
             flush_all();
             lock.lock();
+        }
+    }
+
+    void free_resources() {
+        if (frames_) {
+            delete[] frames_;
+            frames_ = nullptr;
+        }
+        if (frame_locks_) {
+            delete[] frame_locks_;
+            frame_locks_ = nullptr;
         }
     }
 
@@ -287,6 +356,7 @@ private:
 
     // Concurrency
     std::mutex              mutex_;
+    std::shared_mutex       frame_map_mutex_;  // Mutex for frame_map_
     std::condition_variable cv_;           // Condition variable for signaling
     std::thread             background_thread_;
     std::atomic<bool>       running_ {false};
