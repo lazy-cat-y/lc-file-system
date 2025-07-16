@@ -18,6 +18,7 @@
 #include "lc_block.h"
 #include "lc_block_manager.h"
 #include "lc_configs.h"
+#include "lc_memory.h"
 
 LC_NAMESPACE_BEGIN
 LC_FILESYSTEM_NAMESPACE_BEGIN
@@ -91,22 +92,10 @@ public:
     explicit LCBlockBufferPool(LCBlockManager *block_manager,
                                uint32_t pool_size, uint32_t frame_interval_ms) :
         block_manager_(block_manager),
-        frames_(new LCBlockBufferPoolFrame[pool_size]),
         pool_size_(pool_size),
         frame_interval_ms_(frame_interval_ms),
-        frame_locks_(new std::atomic_flag[pool_size]),
         clock_hand_(0) {
-        for (uint32_t i = 0; i < pool_size; ++i) {
-            frame_locks_[i].clear();
-        }
-        for (uint32_t i = 0; i < pool_size; ++i) {
-            frames_[i].valid       = false;
-            frames_[i].dirty       = false;
-            frames_[i].ref_count   = 0;
-            frames_[i].usage_count = 0;
-            frames_[i].block_id    = LC_BLOCK_ILLEGAL_ID;
-            block_clear(&frames_[i].block);
-        }
+        init_resources();
     }
 
     void start() {
@@ -186,7 +175,7 @@ public:
                     continue;  // Retry if the frame is not valid or does not
                                // match
                 }
-                memcpy(&frame.block, &block, DEFAULT_BLOCK_SIZE);
+                lc_memcpy(&frame.block, &block, DEFAULT_BLOCK_SIZE);
                 frame.dirty       = true;
                 frame.usage_count = add_lc_block_usage_count(frame.usage_count);
                 return;
@@ -386,15 +375,24 @@ private:
         }
     }
 
+    void init_resources() {
+        frames_      = lc_alloc_array<LCBlockBufferPoolFrame>(pool_size_);
+        frame_locks_ = lc_alloc_atomic_flag_array(pool_size_);
+        for (uint32_t i = 0; i < pool_size_; ++i) {
+            frames_[i].valid       = false;
+            frames_[i].dirty       = false;
+            frames_[i].ref_count   = 0;
+            frames_[i].usage_count = 0;
+            frames_[i].block_id    = LC_BLOCK_ILLEGAL_ID;
+            block_clear(&frames_[i].block);
+        }
+    }
+
     void free_resources() {
-        if (frames_) {
-            delete[] frames_;
-            frames_ = nullptr;
-        }
-        if (frame_locks_) {
-            delete[] frame_locks_;
-            frame_locks_ = nullptr;
-        }
+        lc_free_array(frames_);
+        frames_ = nullptr;
+        lc_free_array(frame_locks_);
+        frame_locks_ = nullptr;
     }
 
     LCBlockManager         *block_manager_;
