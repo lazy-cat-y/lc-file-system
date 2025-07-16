@@ -3,6 +3,7 @@
 #define LC_INODE_H
 
 #include <cstdint>
+#include <cstring>
 
 #define LC_INODE_SIZE       256
 #define LC_INODE_USED_SIZE  104
@@ -32,5 +33,18 @@ struct Stat {
     uint16_t links;
     uint32_t atime, mtime, ctime;
 };
+
+inline void *inode_clear(LCInode *inode) {
+    memset(inode, 0, sizeof(LCInode));
+    return inode;
+}
+
+inline void *inode_as(LCInode *inode) {
+    return reinterpret_cast<void *>(inode);
+}
+
+inline const void *inode_const_as(const LCInode *inode) {
+    return reinterpret_cast<const void *>(inode);
+}
 
 #endif  // LC_INODE_H

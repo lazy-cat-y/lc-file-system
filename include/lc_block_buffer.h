@@ -37,6 +37,42 @@ inline uint8_t add_lc_block_usage_count(uint8_t usage_count) {
     return std::min<uint8_t>(usage_count + 1, static_cast<uint8_t>(5));
 }
 
+// RAII
+struct LCBlockFrameGuard {
+    LCBlockBufferPoolFrame *frame;
+    std::atomic_flag       *lock_flag;
+
+    LCBlockFrameGuard(LCBlockBufferPoolFrame *f, std::atomic_flag *l) :
+        frame(f),
+        lock_flag(l) {}
+
+    LCBlockFrameGuard(const LCBlockFrameGuard &)            = delete;
+    LCBlockFrameGuard &operator=(const LCBlockFrameGuard &) = delete;
+
+    LCBlockFrameGuard(LCBlockFrameGuard &&other) LC_NOEXCEPT
+        : frame(other.frame),
+          lock_flag(other.lock_flag) {
+        other.lock_flag = nullptr;
+        other.frame     = nullptr;
+    }
+
+    LCBlockFrameGuard &operator=(LCBlockFrameGuard &&other) = delete;
+
+    ~LCBlockFrameGuard() {
+        if (lock_flag) {
+            lock_flag->clear(std::memory_order_release);
+        }
+    }
+
+    void mark_dirty() {
+        if (frame) {
+            frame->dirty = true;
+        }
+    }
+};
+
+// TODO: change Memory model to lc memory model
+
 class LCBlockBufferPool {
 public:
 
@@ -206,6 +242,24 @@ public:
                 block_manager_->write_block(frame.block_id, frame.block);
                 frame.dirty = false;
             }
+        }
+    }
+
+    LCBlockFrameGuard access_frame_lock(uint32_t block_id) {
+        while (true) {
+            uint32_t          frame_index = find_frame(block_id);
+            std::atomic_flag &lock_flag   = frame_locks_[frame_index];
+
+            while (lock_flag.test_and_set(std::memory_order_acquire)) {}
+
+            LCBlockBufferPoolFrame &frame = frames_[frame_index];
+            if (frame.valid && frame.block_id == block_id) {
+                frame.ref_count++;
+                frame.usage_count = add_lc_block_usage_count(frame.usage_count);
+                return {&frame, &lock_flag};
+            }
+
+            lock_flag.clear(std::memory_order_release);
         }
     }
 
