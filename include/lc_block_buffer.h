@@ -33,7 +33,7 @@ typedef struct LCBlockBufferPoolFrame {
     LCBlock  block;        // The block data
 } LCBlockBufferPoolFrame;
 
-inline uint8_t add_usage_count(uint8_t usage_count) {
+inline uint8_t add_lc_block_usage_count(uint8_t usage_count) {
     return std::min<uint8_t>(usage_count + 1, static_cast<uint8_t>(5));
 }
 
@@ -113,7 +113,7 @@ public:
                     continue;
                 }
                 frame.ref_count++;
-                frame.usage_count = add_usage_count(frame.usage_count);
+                frame.usage_count = add_lc_block_usage_count(frame.usage_count);
                 return frame.block;
             }
         }
@@ -152,7 +152,7 @@ public:
                 }
                 memcpy(&frame.block, &block, DEFAULT_BLOCK_SIZE);
                 frame.dirty       = true;
-                frame.usage_count = add_usage_count(frame.usage_count);
+                frame.usage_count = add_lc_block_usage_count(frame.usage_count);
                 return;
             }
         }

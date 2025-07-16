@@ -1,4 +1,7 @@
 
+#ifndef LC_INODE_H
+#define LC_INODE_H
+
 #include <cstdint>
 
 #define LC_INODE_SIZE       256
@@ -29,3 +32,5 @@ struct Stat {
     uint16_t links;
     uint32_t atime, mtime, ctime;
 };
+
+#endif  // LC_INODE_H
