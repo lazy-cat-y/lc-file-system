@@ -37,7 +37,7 @@ inline std::atomic_flag *lc_alloc_atomic_flag_array(size_t count) {
         return nullptr;
     }
     for (size_t i = 0; i < count; ++i) {
-        ptr[i].clear();
+        ptr[i].clear(std::memory_order_release);
     }
     return ptr;
 }

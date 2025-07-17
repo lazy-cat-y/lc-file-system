@@ -42,3 +42,7 @@ add_lcfs_test(inode_manager_test
 add_lcfs_test(block_buffer_test
     block_buffer_test.cpp
 )
+
+add_lcfs_test(inode_buffer_test
+    inode_buffer_test.cpp
+)

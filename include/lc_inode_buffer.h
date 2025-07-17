@@ -8,7 +8,10 @@
 #include <cstdint>
 #include <mutex>
 #include <shared_mutex>
+#include <tuple>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include "lc_block.h"
 #include "lc_block_buffer.h"
@@ -60,6 +63,12 @@ struct LCInodeFrameGuard {
     }
 
     LCInodeFrameGuard &operator=(LCInodeFrameGuard &&other) = delete;
+
+    ~LCInodeFrameGuard() {
+        if (lock_flag) {
+            lock_flag->clear(std::memory_order_release);
+        }
+    }
 
     void mark_dirty() {
         if (frame) {
@@ -118,15 +127,17 @@ public:
 
     LCInode read_inode(uint32_t inode_id) {
         while (true) {
-            uint32_t      frame_index = find_frame(inode_id);
-            FrameSpinLock lock(frame_locks_[frame_index]);
-            auto         &frame = frames_[frame_index];
-            if (!frame.valid || frame.inode_id != inode_id) {
-                continue;
+            uint32_t frame_index = find_frame(inode_id);
+            {
+                FrameSpinLock lock(frame_locks_[frame_index]);
+                auto         &frame = frames_[frame_index];
+                if (!frame.valid || frame.inode_id != inode_id) {
+                    continue;
+                }
+                frame.ref_count++;
+                frame.usage_count = add_lc_inode_usage_count(frame.usage_count);
+                return frame.inode;
             }
-            frame.ref_count++;
-            frame.usage_count = add_lc_inode_usage_count(frame.usage_count);
-            return frame.inode;
         }
         LC_ASSERT(false, "Inode ID not found, this should not happen");
         return LCInode();  // Should never reach here, but return empty inode
@@ -143,7 +154,8 @@ public:
                 }
 
                 lc_memcpy(&frame.inode, &inode, LC_INODE_SIZE);
-                frame.dirty       = true;
+                frame.dirty = true;
+                frame.ref_count++;
                 frame.usage_count = add_lc_inode_usage_count(frame.usage_count);
                 return;
             }
@@ -195,38 +207,91 @@ public:
         }
 
         LC_ASSERT(frame_index != -1, "Frame index not found for inode ID");
+        bool     need_flush = false;
+        uint32_t block_id   = 0;
+        LCInode  inode_copy;
 
         {
             FrameSpinLock lock(frame_locks_[frame_index]);
             auto         &frame = frames_[frame_index];
 
             if (frame.valid && frame.inode_id == inode_id && frame.dirty) {
-                auto blk_guard =
-                    block_buffer_pool_->access_frame_lock(frame.block_id);
-                lc_write_inode_to_block_locked(&frame.inode,
-                                               &blk_guard.frame->block,
-                                               frame.inode_id);
-                blk_guard.mark_dirty();
+                //  跨层 access_frame_lock() 和 unpin_block() 嵌套在 inode lock
+                //  作用域内，可能导致交叉死锁。
+                // auto blk_guard =
+                //     block_buffer_pool_->access_frame_lock(frame.block_id);
+                // lc_write_inode_to_block_locked(&frame.inode,
+                //                                &blk_guard.frame->block,
+                //                                frame.inode_id);
+                // blk_guard.mark_dirty();
+                // frame.dirty = false;
+                // block_buffer_pool_->unpin_block(frame.block_id);
+                block_id = frame.block_id;
+                lc_memcpy(&inode_copy, &frame.inode, LC_INODE_SIZE);
+                need_flush  = true;
                 frame.dirty = false;
-                block_buffer_pool_->unpin_block(frame.block_id);
             }
+        }
+
+        if (need_flush) {
+            {
+                auto blk_guard =
+                    block_buffer_pool_->access_frame_lock(block_id);
+                lc_write_inode_to_block_locked(&inode_copy,
+                                               &blk_guard.frame->block,
+                                               inode_id);
+                blk_guard.mark_dirty();
+            }
+            block_buffer_pool_->unpin_block(block_id);
         }
     }
 
     void flush_all() {
+        // block_id, inode_id, LCInode
+        std::vector<std::tuple<uint32_t, uint32_t, LCInode>> dirty_inodes;
+
         for (uint32_t i = 0; i < pool_size_; ++i) {
-            FrameSpinLock lock(frame_locks_[i]);
-            auto         &frame = frames_[i];
-            if (frame.valid && frame.dirty) {
-                auto blk_guard =
-                    block_buffer_pool_->access_frame_lock(frame.block_id);
-                lc_write_inode_to_block_locked(&frame.inode,
-                                               &blk_guard.frame->block,
-                                               frame.inode_id);
-                blk_guard.mark_dirty();
-                frame.dirty = false;
-                block_buffer_pool_->unpin_block(frame.block_id);
+            bool     need_flush = false;
+            uint32_t block_id   = 0;
+            LCInode  inode_copy;
+            uint32_t inode_id = 0;
+            {
+                FrameSpinLock lock(frame_locks_[i]);
+                auto         &frame = frames_[i];
+                if (frame.valid && frame.dirty) {
+                    // auto blk_guard =
+                    //     block_buffer_pool_->access_frame_lock(frame.block_id);
+                    // lc_write_inode_to_block_locked(&frame.inode,
+                    //                                &blk_guard.frame->block,
+                    //                                frame.inode_id);
+                    // blk_guard.mark_dirty();
+                    // frame.dirty = false;
+                    // block_buffer_pool_->unpin_block(frame.block_id);
+                    block_id = frame.block_id;
+                    inode_id = frame.inode_id;
+                    lc_memcpy(&inode_copy, &frame.inode, LC_INODE_SIZE);
+                    need_flush  = true;
+                    frame.dirty = false;
+                }
+
+                if (need_flush) {
+                    dirty_inodes.emplace_back(block_id,
+                                              inode_id,
+                                              std::move(inode_copy));
+                }
             }
+        }
+
+        for (auto &[block_id, inode_id, inode] : dirty_inodes) {
+            {
+                auto blk_guard =
+                    block_buffer_pool_->access_frame_lock(block_id);
+                lc_write_inode_to_block_locked(&inode,
+                                               &blk_guard.frame->block,
+                                               inode_id);
+                blk_guard.mark_dirty();
+            }
+            block_buffer_pool_->unpin_block(block_id);
         }
     }
 
@@ -234,7 +299,7 @@ private:
 
     class FrameSpinLock {
     public:
-        FrameSpinLock(std::atomic_flag &flag) : flag_(flag) {
+        LC_EXPLICIT FrameSpinLock(std::atomic_flag &flag) : flag_(flag) {
             while (flag_.test_and_set(std::memory_order_acquire)) {}
         }
 
@@ -329,14 +394,16 @@ private:
             if (!frame.valid ||
                 (frame.ref_count == 0 && frame.usage_count == 0)) {
                 if (frame.valid && frame.dirty) {
-                    auto blk_guard =
-                        block_buffer_pool_->access_frame_lock(frame.block_id);
+                    {
+                        auto blk_guard = block_buffer_pool_->access_frame_lock(
+                            frame.block_id);
 
-                    lc_write_inode_to_block_locked(&frame.inode,
-                                                   &blk_guard.frame->block,
-                                                   frame.inode_id);
-                    blk_guard.mark_dirty();
-                    frame.dirty = false;
+                        lc_write_inode_to_block_locked(&frame.inode,
+                                                       &blk_guard.frame->block,
+                                                       frame.inode_id);
+                        blk_guard.mark_dirty();
+                        frame.dirty = false;
+                    }
                     block_buffer_pool_->unpin_block(frame.block_id);
                 }
 

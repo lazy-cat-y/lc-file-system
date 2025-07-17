@@ -366,9 +366,6 @@ private:
                              [this]() { return !running_; })) {
                 break;
             }
-#if defined(DEBUG)
-            std::cout << "Background flush loop running..." << std::endl;
-#endif
             lock.unlock();
             flush_all();
             lock.lock();
