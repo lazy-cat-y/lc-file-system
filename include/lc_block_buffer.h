@@ -146,6 +146,25 @@ public:
         return LCBlock();  // Should never reach here, but return empty block
     }
 
+    void read_block(uint32_t block_id, LCBlock &block) {
+        while (true) {
+            uint32_t frame_index = find_frame(block_id);
+            {
+                FrameSpinLock lock(frame_locks_[frame_index]);
+                auto         &frame = frames_[frame_index];
+
+                if (!frame.valid || frame.block_id != block_id) {
+                    continue;
+                }
+                frame.ref_count++;
+                frame.usage_count = add_lc_block_usage_count(frame.usage_count);
+                lc_memcpy(&block, &frame.block, DEFAULT_BLOCK_SIZE);
+                return;
+            }
+        }
+        LC_ASSERT(false, "Block ID not found, this should not happen");
+    }
+
     /*
      * write_block()
      * find_frame(block_id)

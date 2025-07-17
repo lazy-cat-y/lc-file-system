@@ -9,9 +9,12 @@
 #include <memory>
 
 #include "lc_block.h"
+#include "lc_block_buffer.h"
 #include "lc_block_manager.h"
 #include "lc_configs.h"
 #include "lc_inode.h"
+#include "lc_inode_buffer.h"
+#include "lc_memory.h"
 #include "lc_utils.h"
 
 LC_NAMESPACE_BEGIN
@@ -30,9 +33,7 @@ public:
     LCInodeManager() = delete;
 
     ~LCInodeManager() {
-        if (inode_bitmap_) {
-            delete[] inode_bitmap_;
-        }
+        lc_free_array(inode_bitmap_);
     };
 
     LCInodeManager(const LCInodeManager &)            = delete;
@@ -40,26 +41,29 @@ public:
     LCInodeManager(LCInodeManager &&)                 = delete;
     LCInodeManager &operator=(LCInodeManager &&)      = delete;
 
-    LCInodeManager(std::shared_ptr<LCBlockManager> blockManager) :
-        blockManager_ {std::move(blockManager)},
-        inode_bitmap_ {nullptr},
+    LC_EXPLICIT LCInodeManager(const LCBlockHeader &block_header,
+                               LCBlockBufferPool   *block_buffer_pool,
+                               LCInodeBufferPool   *inode_buffer_pool) :
+        block_buffer_pool_ {block_buffer_pool},
+        inode_buffer_pool_ {inode_buffer_pool},
         inode_cache_info_ {} {
-        read_inode_bitmap();
+        lc_memset(&inode_cache_info_, 0, sizeof(inode_cache_info_));
 
         inode_cache_info_.inode_count =
-            blockManager_->get_header()->inode_count;
-        uint32_t inode_bitmap_size =
+            block_header.inode_count;  // Total number of inodes
+        inode_cache_info_.inode_bitmap_size =
             ceil_divide_int32_t(inode_cache_info_.inode_count, 8);
-        // (inode_cache_info_.inode_count) / 8 +
-        // ((inode_cache_info_.inode_count % 8) ? 1 : 0);
         inode_cache_info_.inode_bitmap_block_count =
-            (blockManager_->get_header()->inode_start -
-             blockManager_->get_header()->inode_bitmap_start);
+            ceil_divide_int32_t(inode_cache_info_.inode_bitmap_size,
+                                DEFAULT_BLOCK_SIZE);
+        inode_cache_info_.inode_bitmap_start = block_header.inode_bitmap_start;
+        inode_cache_info_.inode_bitmap_size =
+            inode_cache_info_.inode_bitmap_size;
 
-        inode_cache_info_.inode_bitmap_start =
-            blockManager_->get_header()->inode_bitmap_start;
-        inode_cache_info_.inode_bitmap_size = inode_bitmap_size;
-        inode_bitmap_                       = new uint8_t[inode_bitmap_size];
+        inode_bitmap_ =
+            lc_alloc_array<uint8_t>(inode_cache_info_.inode_bitmap_size);
+
+        read_inode_bitmap();
         init_last_hint();
     }
 
@@ -103,16 +107,17 @@ public:
     void free_inode(uint32_t ino) {
         LC_ASSERT(ino < inode_cache_info_.inode_count,
                   "Inode number out of range");
-        LCInode inode = load_inode(ino);
-        LC_ASSERT(inode.link_count >= 0, "Inode link count is negative");
-        if (inode.link_count > 1) {
-            --inode.link_count;
-            write_inode(ino, inode);
-        } else {
-            truncate_inode(inode, 0);  // Free blocks and clear metadata
-            clear_inode_bitmap_bit(ino);
-            write_inode(ino, inode);   // Write updated inode
-        }
+        // TODO: re write this function
+        // LCInode inode = load_inode(ino);
+        // LC_ASSERT(inode.link_count >= 0, "Inode link count is negative");
+        // if (inode.link_count > 1) {
+        //     --inode.link_count;
+        //     write_inode(ino, inode);
+        // } else {
+        //     truncate_inode(inode);  // Free blocks;
+        //     clear_inode_bitmap_bit(ino);
+        //     write_inode(ino, inode);   // Write updated inode
+        // }
     }
 
     /*
@@ -129,12 +134,9 @@ public:
     LCInode load_inode(uint32_t ino) {
         LC_ASSERT(ino < inode_cache_info_.inode_count,
                   "Inode number out of range");
-        LCInode  inode {};
-        uint32_t block_index = ino / LC_INODES_PRE_BLOCK;
-        uint32_t offset      = (ino % LC_INODES_PRE_BLOCK) * LC_INODE_SIZE;
-        LCBlock  inode_block {};
-        blockManager_->read_block(block_index, inode_block);
-        memcpy(&inode, block_as(&inode_block) + offset, sizeof(LCInode));
+        LCInode inode {};
+        inode_buffer_pool_->read_inode(ino, inode);
+        inode_buffer_pool_->unpin_inode(ino);
         return inode;
     }
 
@@ -147,31 +149,29 @@ public:
     void write_inode(uint32_t ino, const LCInode &inode) {
         LC_ASSERT(ino < inode_cache_info_.inode_count,
                   "Inode number out of range");
-        uint32_t block_index = ino / LC_INODES_PRE_BLOCK;
-        uint32_t offset      = (ino % LC_INODES_PRE_BLOCK) * LC_INODE_SIZE;
-        LCBlock  inode_block {};
-        blockManager_->read_block(block_index, inode_block);
-        memcpy(block_as(&inode_block) + offset, &inode, sizeof(LCInode));
-        blockManager_->write_block(block_index, inode_block);
+        inode_buffer_pool_->write_inode(ino, inode);
+        // blockManager_->read_block(block_index, inode_block);
+        // memcpy(block_as(&inode_block) + offset, &inode, sizeof(LCInode));
+        // blockManager_->write_block(block_index, inode_block);
     }
 
-    uint32_t get_block_id(LCInode &inode, uint32_t file_blk, bool allocate);
+    // uint32_t get_block_id(LCInode &inode, uint32_t file_blk, bool allocate);
 
-    void read_file_block(LCInode &inode, uint32_t file_blk, char *buf);
-    void write_file_block(LCInode &inode, uint32_t file_blk, const char *buf);
+    // void read_file_block(LCInode &inode, uint32_t file_blk, char *buf);
+    // void write_file_block(LCInode &inode, uint32_t file_blk, const char *buf);
 
-    void truncate_inode(LCInode &inode, uint64_t new_size);
+    void truncate_inode(LCInode &inode);
 
-    void update_atime(LCInode &inode);
-    void update_mtime(LCInode &inode);
-    void update_ctime(LCInode &inode);
+    // void update_atime(LCInode &inode);
+    // void update_mtime(LCInode &inode);
+    // void update_ctime(LCInode &inode);
 
-    Stat stat_inode(const LCInode &inode);
+    // Stat stat_inode(const LCInode &inode);
 
-    uint32_t lookup(const LCInode &dir_inode, const std::string &name);
-    void     add_dir_entry(LCInode &dir_inode, const std::string &name,
-                           uint32_t child_ino);
-    void     remove_dir_entry(LCInode &dir_inode, const std::string &name);
+    // uint32_t lookup(const LCInode &dir_inode, const std::string &name);
+    // void     add_dir_entry(LCInode &dir_inode, const std::string &name,
+    //                        uint32_t child_ino);
+    // void     remove_dir_entry(LCInode &dir_inode, const std::string &name);
 
 private:
 
@@ -195,30 +195,44 @@ private:
     }
 
     void read_inode_bitmap() {
-        LCBlock inode_bitmap_block {};
+        LCBlock  inode_bitmap_block {};
+        uint32_t offset      = 0;
+        uint32_t size        = 0;
+        uint32_t block_index = 0;
         for (uint32_t i = 0; i < inode_cache_info_.inode_bitmap_block_count;
              ++i) {
-            blockManager_->read_block(inode_cache_info_.inode_bitmap_start + i,
-                                      inode_bitmap_block);
-            uint32_t offset = i * DEFAULT_BLOCK_SIZE;
-            uint32_t size   = std::min<uint32_t>(
+            block_index = inode_cache_info_.inode_bitmap_start + i;
+            block_buffer_pool_->read_block(block_index, inode_bitmap_block);
+
+            offset = i * DEFAULT_BLOCK_SIZE;
+            size   = std::min<uint32_t>(
                 DEFAULT_BLOCK_SIZE,
                 inode_cache_info_.inode_bitmap_size - offset);
-            memcpy(inode_bitmap_ + offset, block_as(&inode_bitmap_block), size);
+            lc_memcpy(inode_bitmap_ + offset,
+                      block_as(&inode_bitmap_block),
+                      size);
+
+            block_buffer_pool_->unpin_block(block_index);
         }
     }
 
     void write_inode_bitmap() {
-        LCBlock inode_bitmap_block {};
+        LCBlock  inode_bitmap_block {};
+        uint32_t offset      = 0;
+        uint32_t size        = 0;
+        uint32_t block_index = 0;
         for (uint32_t i = 0; i < inode_cache_info_.inode_bitmap_block_count;
              ++i) {
-            uint32_t offset = i * DEFAULT_BLOCK_SIZE;
-            uint32_t size   = std::min<uint32_t>(
+            offset = i * DEFAULT_BLOCK_SIZE;
+            size   = std::min<uint32_t>(
                 DEFAULT_BLOCK_SIZE,
                 inode_cache_info_.inode_bitmap_size - offset);
-            memcpy(block_as(&inode_bitmap_block), inode_bitmap_ + offset, size);
-            blockManager_->write_block(inode_cache_info_.inode_bitmap_start + i,
-                                       inode_bitmap_block);
+            lc_memcpy(block_as(&inode_bitmap_block),
+                      inode_bitmap_ + offset,
+                      size);
+            block_index = inode_cache_info_.inode_bitmap_start + i;
+            block_buffer_pool_->write_block(block_index, inode_bitmap_block);
+            block_buffer_pool_->unpin_block(block_index);
         }
     }
 
@@ -264,9 +278,10 @@ private:
 
     // private
     // const LCBlockManager &blockManager_;
-    std::shared_ptr<LCBlockManager> blockManager_;
-    uint8_t                        *inode_bitmap_;
-    uint32_t                        inode_last_hint_;
+    LCBlockBufferPool *block_buffer_pool_;
+    LCInodeBufferPool *inode_buffer_pool_;
+    uint8_t           *inode_bitmap_;
+    uint32_t           inode_last_hint_;
 
     struct {
         uint32_t inode_count;

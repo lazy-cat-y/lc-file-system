@@ -10,10 +10,12 @@
 #define LC_DIRECT_PTRS      12
 #define LC_INODES_PRE_BLOCK 16  // 4096 / 256
 
+// FUTURE: We can use inline data for small files stored in the block pointer
+// array and use a flag to control it, but now we just use pointers
 typedef struct __attribute__((packed)) LCInode {
-    uint16_t mode;              // File type and permissions
-    uint16_t uid;               // User ID of the owner
-    uint64_t size;              // Size of the file in bytes
+    uint16_t mode;        // File type and permissions
+    uint16_t uid;         // User ID of the owner
+    uint64_t size;        // Size of the file in bytes
     uint32_t atime, ctime, mtime,
         dtime;            // Access, change, modification, and deletion times
     uint16_t gid;         // Group ID of the owner

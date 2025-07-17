@@ -143,6 +143,24 @@ public:
         return LCInode();  // Should never reach here, but return empty inode
     }
 
+    void read_inode(uint32_t inode_id, LCInode &inode) {
+        while (true) {
+            uint32_t frame_index = find_frame(inode_id);
+            {
+                FrameSpinLock lock(frame_locks_[frame_index]);
+                auto         &frame = frames_[frame_index];
+                if (!frame.valid || frame.inode_id != inode_id) {
+                    continue;
+                }
+                lc_memcpy(&inode, &frame.inode, LC_INODE_SIZE);
+                frame.ref_count++;
+                frame.usage_count = add_lc_inode_usage_count(frame.usage_count);
+                return;
+            }
+        }
+        LC_ASSERT(false, "Inode ID not found, this should not happen");
+    }
+
     void write_inode(uint32_t inode_id, const LCInode &inode) {
         while (true) {
             uint32_t frame_index = find_frame(inode_id);
