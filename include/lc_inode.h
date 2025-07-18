@@ -8,7 +8,11 @@
 #define LC_INODE_SIZE       256
 #define LC_INODE_USED_SIZE  104
 #define LC_DIRECT_PTRS      12
+#define LC_BLOCK_PTRS_SIZE  15  // 12 direct + 3 indirect
 #define LC_INODES_PRE_BLOCK 16  // 4096 / 256
+#define LC_BLOCK_PTR_SIZE   4   // sizeof(uint32_t)
+#define LC_PTRS_PRE_BLOCK                                                      \
+    1024  // (DEFAULT_BLOCK_SIZE(4096) / LC_BLOCK_PTR_SIZE) = 1024
 
 // FUTURE: We can use inline data for small files stored in the block pointer
 // array and use a flag to control it, but now we just use pointers
@@ -21,7 +25,7 @@ typedef struct __attribute__((packed)) LCInode {
     uint16_t gid;         // Group ID of the owner
     uint16_t link_count;  // Number of hard links to the file
     uint32_t blocks;
-    uint32_t block_ptr[LC_DIRECT_PTRS + 3];  // Pointers to data blocks
+    uint32_t block_ptr[LC_BLOCK_PTRS_SIZE];  // Pointers to data blocks
     uint32_t generation;
     uint32_t cr_time;
     uint8_t  reserved[LC_INODE_SIZE -

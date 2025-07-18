@@ -23,8 +23,6 @@
 LC_NAMESPACE_BEGIN
 LC_FILESYSTEM_NAMESPACE_BEGIN
 
-#define LC_BLOCK_ILLEGAL_ID 0xFFFFFFFF
-
 typedef struct LCBlockBufferPoolFrame {
     bool     valid;        // Indicates if the frame is valid
     bool     dirty;        // Indicates if the frame has been modified

@@ -6,7 +6,6 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
-#include <memory>
 
 #include "lc_block.h"
 #include "lc_block_buffer.h"
@@ -43,9 +42,11 @@ public:
 
     LC_EXPLICIT LCInodeManager(const LCBlockHeader &block_header,
                                LCBlockBufferPool   *block_buffer_pool,
-                               LCInodeBufferPool   *inode_buffer_pool) :
+                               LCInodeBufferPool   *inode_buffer_pool,
+                               LCBlockManager      *block_manager) :
         block_buffer_pool_ {block_buffer_pool},
         inode_buffer_pool_ {inode_buffer_pool},
+        block_manager_ {block_manager},
         inode_cache_info_ {} {
         lc_memset(&inode_cache_info_, 0, sizeof(inode_cache_info_));
 
@@ -108,28 +109,25 @@ public:
         LC_ASSERT(ino < inode_cache_info_.inode_count,
                   "Inode number out of range");
         // TODO: re write this function
-        // LCInode inode = load_inode(ino);
-        // LC_ASSERT(inode.link_count >= 0, "Inode link count is negative");
-        // if (inode.link_count > 1) {
-        //     --inode.link_count;
-        //     write_inode(ino, inode);
-        // } else {
-        //     truncate_inode(inode);  // Free blocks;
-        //     clear_inode_bitmap_bit(ino);
-        //     write_inode(ino, inode);   // Write updated inode
-        // }
+        {
+            LCInodeFrameGuard inode_guard =
+                inode_buffer_pool_->access_frame_lock(ino);
+            auto &frame = inode_guard.frame;
+            if (frame->inode.link_count > 1) {
+                --frame->inode.link_count;
+                inode_guard.mark_dirty();
+            } else {
+                truncate_inode(&frame->inode);
+                // clear metadata
+                clear_inode_bitmap_bit(ino);
+            }
+            inode_buffer_pool_->unpin_inode(ino);
+        }
     }
 
     /*
      * load_inode():
      * └─ read inode from the block manager
-     * TODO: Maybe add caching mechanism for frequently accessed inodes
-     *       to avoid reading from disk every time
-     *       (e.g., LRU cache or similar), a buffter pool, also we need a
-     *       mapping inode numbers to their cached locations, a key-value
-     *       store-like structure. And the buffer pool should be stored block
-     *       by block, not inode by inode.
-     *       Do we need a new class for this?
      */
     LCInode load_inode(uint32_t ino) {
         LC_ASSERT(ino < inode_cache_info_.inode_count,
@@ -158,9 +156,27 @@ public:
     // uint32_t get_block_id(LCInode &inode, uint32_t file_blk, bool allocate);
 
     // void read_file_block(LCInode &inode, uint32_t file_blk, char *buf);
-    // void write_file_block(LCInode &inode, uint32_t file_blk, const char *buf);
+    // void write_file_block(LCInode &inode, uint32_t file_blk, const char
+    // *buf);
+    // TODO: change block manager to use LCBlockBufferPool
+    void truncate_inode(LCInode *inode) {
+        for (uint32_t i = 0; i < LC_DIRECT_PTRS; ++i) {
+            if (inode->block_ptr[i] != LC_BLOCK_ILLEGAL_ID) {
+                block_manager_->free_block(inode->block_ptr[i]);
+                inode->block_ptr[i] = LC_BLOCK_ILLEGAL_ID;
+            }
+        }
 
-    void truncate_inode(LCInode &inode);
+        // three levels of indirection
+        // 12 13 14
+        for (uint32_t i = LC_DIRECT_PTRS; i < LC_BLOCK_PTRS_SIZE; ++i) {
+            if (inode->block_ptr[i] != LC_BLOCK_ILLEGAL_ID) {
+                free_indirect_block(inode->block_ptr[i],
+                                    i - LC_DIRECT_PTRS + 1);
+                inode->block_ptr[i] = LC_BLOCK_ILLEGAL_ID;
+            }
+        }
+    }
 
     // void update_atime(LCInode &inode);
     // void update_mtime(LCInode &inode);
@@ -192,6 +208,29 @@ private:
         // Or throw an exception or handle error
         LC_ASSERT(false, "No free inodes available");
         return 0;  // Unreachable, but avoids compiler warning
+    }
+
+    void free_indirect_block(uint32_t block_id, uint32_t level) {
+        if (level == 0 || block_id == LC_BLOCK_ILLEGAL_ID) {
+            return;
+        }
+        LCBlock ptr_block {};
+        block_buffer_pool_->read_block(block_id, ptr_block);
+        block_buffer_pool_->unpin_block(block_id);
+        uint32_t *ptrs = reinterpret_cast<uint32_t *>(block_as(&ptr_block));
+        for (uint32_t i = 0; i < LC_PTRS_PRE_BLOCK; ++i) {
+            if (ptrs[i] == LC_BLOCK_ILLEGAL_ID) {
+                continue;
+            }
+
+            if (level == 1) {
+                block_manager_->free_block(ptrs[i]);
+            } else {
+                free_indirect_block(ptrs[i], level - 1);
+            }
+        }
+
+        block_manager_->free_block(block_id);
     }
 
     void read_inode_bitmap() {
@@ -280,6 +319,7 @@ private:
     // const LCBlockManager &blockManager_;
     LCBlockBufferPool *block_buffer_pool_;
     LCInodeBufferPool *inode_buffer_pool_;
+    LCBlockManager    *block_manager_;
     uint8_t           *inode_bitmap_;
     uint32_t           inode_last_hint_;
 

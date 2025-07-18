@@ -155,6 +155,24 @@ public:
                         DEFAULT_BLOCK_SIZE);
     }
 
+    // TODO: Implement block free and alloc, and we need to make sure
+    // TODO: init inode block the block ptr should set up to illegal ID
+    // that the block is allocated before writing or reading.
+    void alloc_block(uint32_t &block_id);
+
+    // TODO: set block bitmap
+    void free_block(uint32_t block_id) {
+        LC_ASSERT(block_id < header_.total_blocks,
+                  ("Block ID out of range: " + std::to_string(block_id) +
+                   ", max: " + std::to_string(header_.total_blocks - 1))
+                      .c_str());
+
+        LCBlock block {};
+        block_clear(&block);
+        block_clear(&block);
+        write_block(block_id, block);
+    }
+
     const LCBlockHeader *get_header() const {
         return &header_;
     }
