@@ -47,8 +47,8 @@ public:
         LCBlock header_block {};
         img_file_.read(reinterpret_cast<char *>(block_as(&header_block)),
                        DEFAULT_BLOCK_SIZE);
-        LCBlockHeader *header =
-            reinterpret_cast<LCBlockHeader *>(header_block.data);
+        LCSuperBlock *header =
+            reinterpret_cast<LCSuperBlock *>(header_block.data);
         if (header->magic != BLOCK_MAGIC_NUMBER) {
             throw ImgMagicError("Invalid image magic number: " + img_path);
         }
@@ -82,36 +82,36 @@ public:
         uint32_t total_blocks = total_size_bytes / DEFAULT_BLOCK_SIZE;
         uint32_t inode_count  = total_size_bytes / bytes_per_inode;
         uint32_t inode_block_count =
-            ceil_divide_int32_t(inode_count * sizeof(LCBlockHeader),
+            lc_ceil_divide_int32_t(inode_count * sizeof(LCSuperBlock),
                                 DEFAULT_BLOCK_SIZE);
         // (inode_count * sizeof(LCBlockHeader) + DEFAULT_BLOCK_SIZE - 1) /
         // DEFAULT_BLOCK_SIZE;
 
         uint32_t block_bitmap_size =
-            ceil_divide_int32_t(total_blocks, 8);  // 1 bit per block
+            lc_ceil_divide_int32_t(total_blocks, 8);  // 1 bit per block
         // (total_blocks) / 8 + ((total_blocks % 8) ? 1 : 0);
         uint32_t block_bitmap_block_count =
-            ceil_divide_int32_t(block_bitmap_size, DEFAULT_BLOCK_SIZE);
+            lc_ceil_divide_int32_t(block_bitmap_size, DEFAULT_BLOCK_SIZE);
         // (block_bitmap_size) / DEFAULT_BLOCK_SIZE +
         // ((block_bitmap_size % DEFAULT_BLOCK_SIZE) ? 1 : 0);
         uint32_t inode_bitmap_size =
-            ceil_divide_int32_t(inode_count, 8);  // 1 bit per inode
+            lc_ceil_divide_int32_t(inode_count, 8);  // 1 bit per inode
         // (inode_count) / 8 + ((inode_count % 8) ? 1 : 0);
         uint32_t inode_bitmap_block_count =
-            ceil_divide_int32_t(inode_bitmap_size, DEFAULT_BLOCK_SIZE);
+            lc_ceil_divide_int32_t(inode_bitmap_size, DEFAULT_BLOCK_SIZE);
         // (inode_bitmap_size) / DEFAULT_BLOCK_SIZE +
         // ((inode_bitmap_size % DEFAULT_BLOCK_SIZE) ? 1 : 0);
 
-        LCBlockHeader header {};
+        LCSuperBlock header {};
         header.total_blocks       = total_blocks;
         header.inode_count        = inode_count;
         header.block_bitmap_start = 1;  // Usually starts at block 1
         header.inode_bitmap_start =
             header.block_bitmap_start + block_bitmap_block_count;
-        header.inode_start =
+        header.inode_block_start =
             header.inode_bitmap_start + inode_bitmap_block_count;
         header.inode_block_count = inode_block_count;
-        header.data_start        = header.inode_start + inode_block_count;
+        header.data_start        = header.inode_block_start + inode_block_count;
 
         LCBlock header_block {};
         block_clear(&header_block);
@@ -173,13 +173,13 @@ public:
         write_block(block_id, block);
     }
 
-    const LCBlockHeader *get_header() const {
+    const LCSuperBlock *get_header() const {
         return &header_;
     }
 
 private:
     std::string   img_path_;
-    LCBlockHeader header_;
+    LCSuperBlock header_;
     // This one should be thread local
     mutable std::fstream img_file_;
 };

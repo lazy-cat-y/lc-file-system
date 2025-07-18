@@ -15,7 +15,7 @@ class LCInodeBufferTest : public ::testing::Test {
 protected:
     std::string        test_img_path = get_test_img("test_inode_buffer.img");
     LCBlockManager    *block_manager;
-    LCBlockHeader      header;
+    LCSuperBlock      header;
     LCBlockBufferPool *block_buffer_pool;
     LCInodeBufferPool *inode_buffer_pool;
 

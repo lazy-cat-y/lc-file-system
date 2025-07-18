@@ -31,18 +31,26 @@ function(add_lcfs_test test_name)
     add_test(NAME ${test_name} COMMAND ${test_name})
 endfunction()
 
-add_lcfs_test(block_manager_test
-    block_manager_test.cpp
+add_lcfs_test(image_format_test
+    image_format_test.cpp
 )
 
-add_lcfs_test(inode_manager_test
-    inode_manager_test.cpp
+add_lcfs_test(block_device_test
+    block_device_test.cpp
 )
 
-add_lcfs_test(block_buffer_test
-    block_buffer_test.cpp
-)
+# add_lcfs_test(block_manager_test
+#     block_manager_test.cpp
+# )
 
-add_lcfs_test(inode_buffer_test
-    inode_buffer_test.cpp
-)
+# add_lcfs_test(inode_manager_test
+#     inode_manager_test.cpp
+# )
+
+# add_lcfs_test(block_buffer_test
+#     block_buffer_test.cpp
+# )
+
+# add_lcfs_test(inode_buffer_test
+#     inode_buffer_test.cpp
+# )

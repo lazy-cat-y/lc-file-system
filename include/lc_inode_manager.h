@@ -40,7 +40,7 @@ public:
     LCInodeManager(LCInodeManager &&)                 = delete;
     LCInodeManager &operator=(LCInodeManager &&)      = delete;
 
-    LC_EXPLICIT LCInodeManager(const LCBlockHeader &block_header,
+    LC_EXPLICIT LCInodeManager(const LCSuperBlock &block_header,
                                LCBlockBufferPool   *block_buffer_pool,
                                LCInodeBufferPool   *inode_buffer_pool,
                                LCBlockManager      *block_manager) :
@@ -53,9 +53,9 @@ public:
         inode_cache_info_.inode_count =
             block_header.inode_count;  // Total number of inodes
         inode_cache_info_.inode_bitmap_size =
-            ceil_divide_int32_t(inode_cache_info_.inode_count, 8);
+            lc_ceil_divide_int32_t(inode_cache_info_.inode_count, 8);
         inode_cache_info_.inode_bitmap_block_count =
-            ceil_divide_int32_t(inode_cache_info_.inode_bitmap_size,
+            lc_ceil_divide_int32_t(inode_cache_info_.inode_bitmap_size,
                                 DEFAULT_BLOCK_SIZE);
         inode_cache_info_.inode_bitmap_start = block_header.inode_bitmap_start;
         inode_cache_info_.inode_bitmap_size =

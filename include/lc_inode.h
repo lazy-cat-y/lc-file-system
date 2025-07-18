@@ -5,6 +5,9 @@
 #include <cstdint>
 #include <cstring>
 
+#include "lc_memory.h"
+#include "lc_utils.h"
+
 #define LC_INODE_SIZE       256
 #define LC_INODE_USED_SIZE  104
 #define LC_DIRECT_PTRS      12
@@ -42,6 +45,7 @@ struct Stat {
 
 inline void *inode_clear(LCInode *inode) {
     memset(inode, 0, sizeof(LCInode));
+    lc_memset(inode->block_ptr, LC_BLOCK_ILLEGAL_ID, sizeof(inode->block_ptr));
     return inode;
 }
 

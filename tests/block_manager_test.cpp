@@ -22,7 +22,7 @@ protected:
 
 TEST_F(LCBlockManagerTest, HeaderValidationAfterFormat) {
     LCBlockManager manager(test_img_path);
-    const LCBlockHeader* header = manager.get_header();
+    const LCSuperBlock* header = manager.get_header();
 
     EXPECT_EQ(header->magic, BLOCK_MAGIC_NUMBER);
     EXPECT_EQ(header->block_size, DEFAULT_BLOCK_SIZE);
