@@ -28,6 +28,22 @@ if (ENABLE_MULTITHREAD)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread")
 endif()
 
+# For segmentation fault debugging
+option(ENABLE_ADDRESS_SANITIZER "Enable Address Sanitizer" OFF)
+# For memory leak debugging
+option(ENABLE_VALGRIND "Enable Valgrind" ON)
+
+if (ENABLE_ADDRESS_SANITIZER)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address -fno-omit-frame-pointer -ggdb")
+    message(STATUS "Address Sanitizer is enabled")
+elseif(ENABLE_VALGRIND)
+    message(STATUS "Valgrind is enabled")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=undefined -fno-omit-frame-pointer")
+else()
+    message(STATUS "Neither Address Sanitizer nor Valgrind is enabled")
+endif()
+
+
 include(FetchContent)
 
 include_directories(${CMAKE_SOURCE_DIR}/include)

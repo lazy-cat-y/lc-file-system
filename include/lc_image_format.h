@@ -11,6 +11,9 @@
 LC_NAMESPACE_BEGIN
 LC_FILESYSTEM_NAMESPACE_BEGIN
 
+// TODO: sign the bitmap blocks, inode blocks and super blocks as allocated and
+// write into the block bitmap.
+
 void lc_format_image(const std::string &img_path,
                      const uint64_t     total_size_bytes);
 

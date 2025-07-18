@@ -16,9 +16,10 @@
 #include <unordered_map>
 
 #include "lc_block.h"
-#include "lc_block_manager.h"
+#include "lc_block_device.h"
 #include "lc_configs.h"
 #include "lc_memory.h"
+#include "lc_utils.h"
 
 LC_NAMESPACE_BEGIN
 LC_FILESYSTEM_NAMESPACE_BEGIN
@@ -57,7 +58,13 @@ struct LCBlockFrameGuard {
 
     LCBlockFrameGuard &operator=(LCBlockFrameGuard &&other) = delete;
 
+    // NOTE: no longer need to call unpin_block for access frame function
     ~LCBlockFrameGuard() {
+        if (frame) {
+            if (frame->ref_count > 0) {
+                frame->ref_count--;
+            }
+        }
         if (lock_flag) {
             lock_flag->clear(std::memory_order_release);
         }
@@ -69,8 +76,6 @@ struct LCBlockFrameGuard {
         }
     }
 };
-
-// TODO: change Memory model to lc memory model
 
 class LCBlockBufferPool {
 public:
@@ -87,9 +92,10 @@ public:
     LCBlockBufferPool(LCBlockBufferPool &&)                 = delete;
     LCBlockBufferPool &operator=(LCBlockBufferPool &&)      = delete;
 
-    explicit LCBlockBufferPool(LCBlockManager *block_manager,
-                               uint32_t pool_size, uint32_t frame_interval_ms) :
-        block_manager_(block_manager),
+    LC_EXPLICIT LCBlockBufferPool(LCBlockDevice *block_device,
+                                  uint32_t       pool_size,
+                                  uint32_t       frame_interval_ms) :
+        block_device_(block_device),
         pool_size_(pool_size),
         frame_interval_ms_(frame_interval_ms),
         clock_hand_(0) {
@@ -144,6 +150,7 @@ public:
         return LCBlock();  // Should never reach here, but return empty block
     }
 
+    // This function copies the contents, ref_count is not incremented
     void read_block(uint32_t block_id, LCBlock &block) {
         while (true) {
             uint32_t frame_index = find_frame(block_id);
@@ -154,7 +161,6 @@ public:
                 if (!frame.valid || frame.block_id != block_id) {
                     continue;
                 }
-                frame.ref_count++;
                 frame.usage_count = add_lc_block_usage_count(frame.usage_count);
                 lc_memcpy(&block, &frame.block, DEFAULT_BLOCK_SIZE);
                 return;
@@ -171,23 +177,11 @@ public:
      * └─ return
      */
     void write_block(uint32_t block_id, const LCBlock &block) {
-#if defined(DEBUG)
-        int retry = 0;
-#endif
         while (true) {
             uint32_t frame_index = find_frame(block_id);
             {
                 FrameSpinLock lock(frame_locks_[frame_index]);
                 auto         &frame = frames_[frame_index];
-#if defined(DEBUG)
-                if (retry++ > 10000) {
-                    std::cerr << "write_block retry block_id=" << block_id
-                              << " got frame.block_id=" << frame.block_id
-                              << std::endl;
-                    LC_ASSERT(false, "Too many retries in write_block");
-                }
-#endif
-
                 if (!frame.valid || frame.block_id != block_id) {
                     continue;  // Retry if the frame is not valid or does not
                                // match
@@ -222,9 +216,10 @@ public:
         {
             std::shared_lock<std::shared_mutex> shared_lock(frame_map_mutex_);
             auto                                it = frame_map_.find(block_id);
-            if (it != frame_map_.end()) {
-                frame_index = it->second;
+            if (it == frame_map_.end()) {
+                return;
             }
+            frame_index = it->second;
         }
 
         LC_ASSERT(frame_index != -1, "Frame index not found for block ID");
@@ -233,8 +228,12 @@ public:
             FrameSpinLock lock(frame_locks_[frame_index]);
             auto         &frame = frames_[frame_index];
 
-            if (frame.valid && frame.block_id == block_id && frame.dirty) {
-                block_manager_->write_block(frame.block_id, frame.block);
+            if (!(frame.valid && frame.block_id == block_id)) {
+                return;
+            }
+
+            if (frame.dirty) {
+                block_device_->write_block(frame.block_id, frame.block);
                 frame.dirty = false;
             }
         }
@@ -245,7 +244,7 @@ public:
             FrameSpinLock lock(frame_locks_[i]);
             auto         &frame = frames_[i];
             if (frame.valid && frame.dirty) {
-                block_manager_->write_block(frame.block_id, frame.block);
+                block_device_->write_block(frame.block_id, frame.block);
                 frame.dirty = false;
             }
         }
@@ -332,7 +331,7 @@ private:
 
             frame.block_id = block_id;
             frame.dirty    = false;
-            block_manager_->read_block(block_id, frame.block);
+            block_device_->read_block(block_id, frame.block);
             frame.ref_count      = 0;
             frame.usage_count    = 1;
             frame_map_[block_id] = frame_index;
@@ -355,7 +354,7 @@ private:
                 (frame.ref_count == 0 && frame.usage_count == 0)) {
                 if (frame.valid && frame.dirty) {
                     // If the frame is dirty, flush it to disk
-                    block_manager_->write_block(frame.block_id, frame.block);
+                    block_device_->write_block(frame.block_id, frame.block);
                 }
 
                 frame.valid = false;
@@ -409,7 +408,8 @@ private:
         frame_locks_ = nullptr;
     }
 
-    LCBlockManager         *block_manager_;
+    // LCBlockManager         *block_manager_;
+    LCBlockDevice          *block_device_;
     LCBlockBufferPoolFrame *frames_;
     uint32_t                pool_size_;
     uint32_t                frame_interval_ms_;

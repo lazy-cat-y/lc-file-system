@@ -6,6 +6,9 @@
 
 #include "lc_configs.h"
 
+#define DEFAULT_BLOCK_SIZE 4096
+#define LC_BITS_PER_BLOCK  32768  // 4096 * 8 bits
+
 #define LC_BLOCK_ILLEGAL_ID 0xFFFFFFFF
 #define LC_INODE_ILLEGAL_ID 0xFFFFFFFF
 

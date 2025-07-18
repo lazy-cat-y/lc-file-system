@@ -7,11 +7,13 @@
 #include <cstddef>
 #include <cstdint>
 
-#define DEFAULT_BLOCK_SIZE 4096
+#include "lc_utils.h"
+
 #define BLOCK_MAGIC_NUMBER 0xDEADBEEF
 
 typedef struct LCBlock {
-    uint8_t data[DEFAULT_BLOCK_SIZE];  // Pointer to the block data
+    alignas(DEFAULT_BLOCK_SIZE)
+        uint8_t data[DEFAULT_BLOCK_SIZE];  // Pointer to the block data
 } LCBlock;
 
 void block_clear(LCBlock *block);
@@ -34,7 +36,7 @@ struct LCSuperBlock {
     uint32_t inode_bitmap_start;
     uint32_t inode_block_start;  // = bitmap_start + bitmap_blocks
     uint32_t inode_block_count;
-    uint32_t data_start;   // = inode_start + inode_block_count
+    uint32_t data_start;         // = inode_start + inode_block_count
 } __attribute__((packed));
 
-#endif                     // LC_BLOCK_H
+#endif                           // LC_BLOCK_H
