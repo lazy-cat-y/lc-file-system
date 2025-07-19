@@ -31,6 +31,9 @@ void lc_clear_image(std::ofstream &img_file, const uint32_t total_blocks);
 
 void lc_initialize_inodes(std::ofstream &img_file, const LCSuperBlock &header);
 
+void lc_initialize_block_bitmap(std::ofstream      &img_file,
+                                const LCSuperBlock &header);
+
 LC_FILESYSTEM_NAMESPACE_END
 LC_NAMESPACE_END
 

@@ -1,5 +1,7 @@
 #include "lc_image_format.h"
 
+#include <sys/types.h>
+
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -34,6 +36,8 @@ void lc_format_image(const std::string &img_path,
 
     // initialize all inodes
     lc_initialize_inodes(img_file, header);
+
+    lc_initialize_block_bitmap(img_file, header);
 }
 
 void lc_ensure_parent_directory_exists(const std::string &img_path) {
@@ -122,6 +126,45 @@ void lc_initialize_inodes(std::ofstream &img_file, const LCSuperBlock &header) {
     for (uint32_t i = 0; i < header.inode_block_count; ++i) {
         img_file.seekp((header.inode_block_start + i) * DEFAULT_BLOCK_SIZE);
         img_file.write(reinterpret_cast<char *>(block_as(&inode_block)),
+                       DEFAULT_BLOCK_SIZE);
+    }
+}
+
+// Mark the super block and inode blocks, inode bitmap blocks, block bitmap
+// blocks as allocated size = [0, header.data_start)
+void lc_initialize_block_bitmap(std::ofstream      &img_file,
+                                const LCSuperBlock &header) {
+    uint32_t signed_blocks = header.data_start;  // [0, header.data_start)
+
+    uint32_t bitmap_bytes = lc_ceil_divide_int32_t(signed_blocks, 8);
+    uint32_t bitmap_blocks =
+        lc_ceil_divide_int32_t(bitmap_bytes, DEFAULT_BLOCK_SIZE);
+
+    LCBlock bitmap_block {};
+    for (uint32_t block_index = 0; block_index < bitmap_blocks; ++block_index) {
+        block_clear(&bitmap_block);
+        uint8_t *bitmap_data = block_as(&bitmap_block);
+
+        for (uint32_t byte_index = 0; byte_index < DEFAULT_BLOCK_SIZE;
+             ++byte_index) {
+            uint32_t bit_index =
+                block_index * DEFAULT_BLOCK_SIZE * 8 + byte_index * 8;
+            if (bit_index >= signed_blocks) {
+                break;
+            }
+
+            uint8_t byte = 0;
+            uint32_t bits_to_set = std::min(8u, signed_blocks - bit_index);
+            for (uint32_t bit = 0; bit < bits_to_set; ++bit) {
+                byte |= (1 << bit);
+            }
+
+            bitmap_data[byte_index] = byte;
+        }
+
+        img_file.seekp((header.block_bitmap_start + block_index) *
+                       DEFAULT_BLOCK_SIZE);
+        img_file.write(reinterpret_cast<char *>(block_as(&bitmap_block)),
                        DEFAULT_BLOCK_SIZE);
     }
 }
