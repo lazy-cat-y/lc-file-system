@@ -39,9 +39,9 @@ add_lcfs_test(block_device_test
     block_device_test.cpp
 )
 
-# add_lcfs_test(block_manager_test
-#     block_manager_test.cpp
-# )
+add_lcfs_test(block_manager_test
+    block_manager_test.cpp
+)
 
 # add_lcfs_test(inode_manager_test
 #     inode_manager_test.cpp

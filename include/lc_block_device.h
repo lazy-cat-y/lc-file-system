@@ -65,7 +65,7 @@ public:
         }
     }
 
-    LCSuperBlock get_super_block() const {
+    const LCSuperBlock &get_super_block() const {
         return header_;
     }
 

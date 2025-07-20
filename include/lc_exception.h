@@ -7,6 +7,7 @@
 #  error "lc_exception.h is a C++ header and must be compiled as C++"
 #endif
 
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 

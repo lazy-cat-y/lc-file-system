@@ -19,8 +19,8 @@ inline LCBitmapIndex lc_cal_bitmap_index(uint32_t block_start, uint32_t id) {
     LCBitmapIndex index;
     index.block_id            = block_start + id / LC_BITS_PER_BLOCK;
     uint32_t block_bit_offset = id % LC_BITS_PER_BLOCK;
-    index.byte_offset         = block_bit_offset / 8;
-    index.bit_offset          = block_bit_offset % 8;
+    index.byte_offset = block_bit_offset / 8;
+    index.bit_offset  = block_bit_offset % 8;
     return index;
 }
 
