@@ -43,7 +43,7 @@ public:
                                 super_block->data_start);
     }
 
-    void read_block(uint32_t block_id, LCBlock &block) const {
+    void read_block(uint32_t block_id, LCBlock &block) {
         LC_ASSERT(block_id < super_block_->total_blocks, "Invalid block ID");
 
 #if defined(DEBUG)
@@ -63,6 +63,26 @@ public:
 #endif  // DEBUG
 
         block_buffer_pool_->read_block(block_id, block);
+    }
+
+    void read_block(uint32_t block_id, void *data, uint32_t size,
+                    uint32_t offset = 0) {
+        LC_ASSERT(block_id < super_block_->total_blocks, "Invalid block ID");
+#if defined(DEBUG)
+        {
+            LCBitmapIndex index =
+                lc_cal_bitmap_index(super_block_->block_bitmap_start, block_id);
+            LC_ASSERT(index.block_id < super_block_->total_blocks,
+                      "Block ID out of bounds");
+            LCBlockFrameGuard bitmap_frame_guard =
+                block_buffer_pool_->access_frame_lock(index.block_id);
+            LCBlock &bitmap_block = bitmap_frame_guard.frame->block;
+            LC_ASSERT(block_as_const(&bitmap_block)[index.byte_offset] &
+                          (1 << index.bit_offset),
+                      "Block is not allocated");
+        }
+#endif  // DEBUG
+        block_buffer_pool_->read_block(block_id, data, size, offset);
     }
 
     void write_block(uint32_t block_id, const LCBlock &block) {
@@ -87,7 +107,28 @@ public:
         block_buffer_pool_->write_block(block_id, block);
     }
 
-    // FIXME: Find the block from the bit where the data_start located.
+    void write_block(uint32_t block_id, const void *data, uint32_t size,
+                     uint32_t offset = 0) {
+        LC_ASSERT(block_id < super_block_->total_blocks, "Invalid block ID");
+#if defined(DEBUG)
+        {
+            // The block must be allocated before writing
+            LCBitmapIndex index =
+                lc_cal_bitmap_index(super_block_->block_bitmap_start, block_id);
+            LC_ASSERT(index.block_id < super_block_->total_blocks,
+                      "Block ID out of bounds");
+            LCBlockFrameGuard bitmap_frame_guard =
+                block_buffer_pool_->access_frame_lock(index.block_id);
+            LCBlock &bitmap_block = bitmap_frame_guard.frame->block;
+            LC_ASSERT(block_as_const(&bitmap_block)[index.byte_offset] &
+                          (1 << index.bit_offset),
+                      "Block is not allocated");
+        }
+#endif  // DEBUG
+
+        block_buffer_pool_->write_block(block_id, data, size, offset);
+    }
+
     // that the block is allocated before writing or reading.
     uint32_t alloc_block() {
         // Find a free block in the bitmap

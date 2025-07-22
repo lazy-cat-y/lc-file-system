@@ -168,6 +168,28 @@ public:
         LC_ASSERT(false, "Block ID not found, this should not happen");
     }
 
+    void read_block(uint32_t block_id, void *data, uint32_t size,
+                    uint32_t offset = 0) {
+        LC_ASSERT(size < DEFAULT_BLOCK_SIZE - offset,
+                  "Size exceeds block size minus offset");
+        while (true) {
+            uint32_t frame_index = find_frame(block_id);
+            {
+                FrameSpinLock lock(frame_locks_[frame_index]);
+                auto         &frame = frames_[frame_index];
+
+                if (!frame.valid || frame.block_id != block_id) {
+                    continue;
+                }
+                frame.usage_count = add_lc_block_usage_count(frame.usage_count);
+                lc_memcpy(static_cast<uint8_t *>(data),
+                          &frame.block + offset,
+                          size);
+                return;
+            }
+        }
+    }
+
     /*
      * write_block()
      * find_frame(block_id)
@@ -193,6 +215,27 @@ public:
         }
         LC_ASSERT(false, "Block ID not found, this should not happen");
         // Should never reach here
+    }
+
+    void write_block(uint32_t block_id, const void *data, uint32_t size,
+                     uint32_t offset = 0) {
+        LC_ASSERT(size < DEFAULT_BLOCK_SIZE - offset,
+                  "Size exceeds block size minus offset");
+        while (true) {
+            uint32_t frame_index = find_frame(block_id);
+            {
+                FrameSpinLock lock(frame_locks_[frame_index]);
+                auto         &frame = frames_[frame_index];
+                if (!frame.valid || frame.block_id != block_id) {
+                    continue;  // Retry if the frame is not valid or does not
+                               // match
+                }
+                lc_memcpy(block_as(&frame.block) + offset, data, size);
+                frame.dirty       = true;
+                frame.usage_count = add_lc_block_usage_count(frame.usage_count);
+                return;
+            }
+        }
     }
 
     void unpin_block(uint32_t block_id) {

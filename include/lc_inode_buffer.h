@@ -8,13 +8,10 @@
 #include <cstdint>
 #include <mutex>
 #include <shared_mutex>
-#include <tuple>
 #include <unordered_map>
 #include <utility>
-#include <vector>
 
-#include "lc_block.h"
-#include "lc_block_buffer.h"
+#include "lc_block_manager.h"
 #include "lc_configs.h"
 #include "lc_inode.h"
 #include "lc_memory.h"
@@ -38,12 +35,6 @@ inline uint8_t add_lc_inode_usage_count(uint8_t usage_count) {
     return std::min<uint8_t>(usage_count + 1, static_cast<uint8_t>(5));
 }
 
-inline void lc_write_inode_to_block_locked(LCInode *inode, LCBlock *block,
-                                           uint32_t inode_id) {
-    uint32_t offset = (inode_id % LC_INODES_PRE_BLOCK) * LC_INODE_SIZE;
-    lc_memcpy(block_as(block) + offset, inode, LC_INODE_SIZE);
-}
-
 struct LCInodeFrameGuard {
     LCInodeBufferPoolFrame *frame;
     std::atomic_flag       *lock_flag;
@@ -65,6 +56,9 @@ struct LCInodeFrameGuard {
     LCInodeFrameGuard &operator=(LCInodeFrameGuard &&other) = delete;
 
     ~LCInodeFrameGuard() {
+        if (frame->ref_count > 0) {
+            frame->ref_count--;
+        }
         if (lock_flag) {
             lock_flag->clear(std::memory_order_release);
         }
@@ -92,12 +86,12 @@ public:
         free_resources();
     }
 
-    LC_EXPLICIT LCInodeBufferPool(LCBlockBufferPool *block_buffer_pool,
-                                  uint32_t           pool_size,
-                                  uint32_t           frame_interval_ms,
-                                  uint32_t           inode_start_block_id,
-                                  uint32_t           inode_count) :
-        block_buffer_pool_(block_buffer_pool),
+    LC_EXPLICIT LCInodeBufferPool(LCBlockManager *block_buffer_pool,
+                                  uint32_t        pool_size,
+                                  uint32_t        frame_interval_ms,
+                                  uint32_t        inode_start_block_id,
+                                  uint32_t        inode_count) :
+        block_manager_(block_buffer_pool),
         pool_size_(pool_size),
         frame_interval_ms_(frame_interval_ms),
         inode_start_block_id_(inode_start_block_id),
@@ -153,7 +147,6 @@ public:
                     continue;
                 }
                 lc_memcpy(&inode, &frame.inode, LC_INODE_SIZE);
-                frame.ref_count++;
                 frame.usage_count = add_lc_inode_usage_count(frame.usage_count);
                 return;
             }
@@ -172,8 +165,7 @@ public:
                 }
 
                 lc_memcpy(&frame.inode, &inode, LC_INODE_SIZE);
-                frame.dirty = true;
-                frame.ref_count++;
+                frame.dirty       = true;
                 frame.usage_count = add_lc_inode_usage_count(frame.usage_count);
                 return;
             }
@@ -225,91 +217,39 @@ public:
         }
 
         LC_ASSERT(frame_index != -1, "Frame index not found for inode ID");
-        bool     need_flush = false;
-        uint32_t block_id   = 0;
-        LCInode  inode_copy;
+
+        // calcul offset and write is fine
 
         {
             FrameSpinLock lock(frame_locks_[frame_index]);
             auto         &frame = frames_[frame_index];
 
             if (frame.valid && frame.inode_id == inode_id && frame.dirty) {
-                //  跨层 access_frame_lock() 和 unpin_block() 嵌套在 inode lock
-                //  作用域内，可能导致交叉死锁。
-                // auto blk_guard =
-                //     block_buffer_pool_->access_frame_lock(frame.block_id);
-                // lc_write_inode_to_block_locked(&frame.inode,
-                //                                &blk_guard.frame->block,
-                //                                frame.inode_id);
-                // blk_guard.mark_dirty();
-                // frame.dirty = false;
-                // block_buffer_pool_->unpin_block(frame.block_id);
-                block_id = frame.block_id;
-                lc_memcpy(&inode_copy, &frame.inode, LC_INODE_SIZE);
-                need_flush  = true;
+                uint32_t offset = calc_offset(inode_id);
+                block_manager_->write_block(frame.block_id,
+                                            &frame.inode,
+                                            LC_INODE_SIZE,
+                                            offset);
                 frame.dirty = false;
             }
-        }
-
-        if (need_flush) {
-            {
-                auto blk_guard =
-                    block_buffer_pool_->access_frame_lock(block_id);
-                lc_write_inode_to_block_locked(&inode_copy,
-                                               &blk_guard.frame->block,
-                                               inode_id);
-                blk_guard.mark_dirty();
-            }
-            block_buffer_pool_->unpin_block(block_id);
         }
     }
 
     void flush_all() {
         // block_id, inode_id, LCInode
-        std::vector<std::tuple<uint32_t, uint32_t, LCInode>> dirty_inodes;
-
         for (uint32_t i = 0; i < pool_size_; ++i) {
-            bool     need_flush = false;
-            uint32_t block_id   = 0;
-            LCInode  inode_copy;
-            uint32_t inode_id = 0;
             {
                 FrameSpinLock lock(frame_locks_[i]);
                 auto         &frame = frames_[i];
                 if (frame.valid && frame.dirty) {
-                    // auto blk_guard =
-                    //     block_buffer_pool_->access_frame_lock(frame.block_id);
-                    // lc_write_inode_to_block_locked(&frame.inode,
-                    //                                &blk_guard.frame->block,
-                    //                                frame.inode_id);
-                    // blk_guard.mark_dirty();
-                    // frame.dirty = false;
-                    // block_buffer_pool_->unpin_block(frame.block_id);
-                    block_id = frame.block_id;
-                    inode_id = frame.inode_id;
-                    lc_memcpy(&inode_copy, &frame.inode, LC_INODE_SIZE);
-                    need_flush  = true;
+                    uint32_t offset = calc_offset(frame.inode_id);
+                    block_manager_->write_block(frame.block_id,
+                                                &frame.inode,
+                                                LC_INODE_SIZE,
+                                                offset);
                     frame.dirty = false;
                 }
-
-                if (need_flush) {
-                    dirty_inodes.emplace_back(block_id,
-                                              inode_id,
-                                              std::move(inode_copy));
-                }
             }
-        }
-
-        for (auto &[block_id, inode_id, inode] : dirty_inodes) {
-            {
-                auto blk_guard =
-                    block_buffer_pool_->access_frame_lock(block_id);
-                lc_write_inode_to_block_locked(&inode,
-                                               &blk_guard.frame->block,
-                                               inode_id);
-                blk_guard.mark_dirty();
-            }
-            block_buffer_pool_->unpin_block(block_id);
         }
     }
 
@@ -388,12 +328,10 @@ private:
             frame.inode_id = inode_id;
             frame.dirty    = false;
             frame.block_id = calc_block_id(inode_id);
-            LCBlock block  = block_buffer_pool_->read_block(frame.block_id);
-            lc_memcpy(&frame.inode,
-                      block_as_const(&block) + calc_offset(inode_id),
-                      LC_INODE_SIZE);
-            block_buffer_pool_->unpin_block(frame.block_id);
-
+            block_manager_->read_block(frame.block_id,
+                                       &frame.inode,
+                                       LC_INODE_SIZE,
+                                       calc_offset(inode_id));
             frame.ref_count      = 0;
             frame.usage_count    = 1;
             frame_map_[inode_id] = frame_index;
@@ -412,17 +350,11 @@ private:
             if (!frame.valid ||
                 (frame.ref_count == 0 && frame.usage_count == 0)) {
                 if (frame.valid && frame.dirty) {
-                    {
-                        auto blk_guard = block_buffer_pool_->access_frame_lock(
-                            frame.block_id);
-
-                        lc_write_inode_to_block_locked(&frame.inode,
-                                                       &blk_guard.frame->block,
-                                                       frame.inode_id);
-                        blk_guard.mark_dirty();
-                        frame.dirty = false;
-                    }
-                    block_buffer_pool_->unpin_block(frame.block_id);
+                    uint32_t offset = calc_offset(frame.inode_id);
+                    block_manager_->write_block(frame.block_id,
+                                                &frame.inode,
+                                                LC_INODE_SIZE,
+                                                offset);
                 }
 
                 frame.valid = false;
@@ -465,7 +397,7 @@ private:
 
     // We can not hold the ownership of the block buffer pool here,
     // just point to it.
-    LCBlockBufferPool                     *block_buffer_pool_;
+    LCBlockManager                        *block_manager_;
     LCInodeBufferPoolFrame                *frames_;
     uint32_t                               pool_size_;
     uint32_t                               frame_interval_ms_;
