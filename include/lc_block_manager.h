@@ -38,6 +38,9 @@ public:
         LC_ASSERT(super_block_ != nullptr, "Super block cannot be null");
         block_bitmap_size_ =
             super_block_->inode_bitmap_start - super_block_->block_bitmap_start;
+        data_start_index_ =
+            lc_cal_bitmap_index(super_block_->block_bitmap_start,
+                                super_block->data_start);
     }
 
     void read_block(uint32_t block_id, LCBlock &block) const {
@@ -88,28 +91,37 @@ public:
     // that the block is allocated before writing or reading.
     uint32_t alloc_block() {
         // Find a free block in the bitmap
-        for (uint32_t bitmap_block_index = 0;
+        for (uint32_t bitmap_block_index = data_start_index_.block_id;
              bitmap_block_index < block_bitmap_size_;
              ++bitmap_block_index) {
-            uint32_t bitmap_block_id =
-                super_block_->block_bitmap_start + bitmap_block_index;
             {
                 LCBlockFrameGuard bitmap_frame_guard =
-                    block_buffer_pool_->access_frame_lock(bitmap_block_id);
+                    block_buffer_pool_->access_frame_lock(bitmap_block_index);
                 LCBlock &bitmap_block = bitmap_frame_guard.frame->block;
                 uint8_t *bitmap_data  = block_as(&bitmap_block);
-                for (uint32_t byte_offset = 0; byte_offset < DEFAULT_BLOCK_SIZE;
+                uint32_t start_byte =
+                    (bitmap_block_index == data_start_index_.block_id)
+                        ? data_start_index_.byte_offset
+                        : 0;
+                for (uint32_t byte_offset = start_byte;
+                     byte_offset < DEFAULT_BLOCK_SIZE;
                      ++byte_offset) {
                     if (bitmap_data[byte_offset] == 0xFF) {
                         continue;
                     }
-
-                    for (uint32_t bit_offset = 0; bit_offset < 8;
+                    uint32_t start_bit =
+                        (bitmap_block_index == data_start_index_.block_id &&
+                         byte_offset == data_start_index_.byte_offset)
+                            ? data_start_index_.bit_offset
+                            : 0;
+                    for (uint32_t bit_offset = (start_bit); bit_offset < 8;
                          ++bit_offset) {
                         if (!(bitmap_data[byte_offset] & (1 << bit_offset))) {
                             bitmap_data[byte_offset] |= (1 << bit_offset);
                             uint32_t block_id =
-                                bitmap_block_index * LC_BITS_PER_BLOCK +
+                                (bitmap_block_index -
+                                 super_block_->block_bitmap_start) *
+                                    LC_BITS_PER_BLOCK +
                                 byte_offset * 8 + bit_offset;
                             LC_ASSERT(block_id < super_block_->total_blocks,
                                       "Block ID out of bounds");
@@ -134,23 +146,21 @@ public:
                   "Block Bitmap ID out of bounds");
 
         {
-            LCBlockFrameGuard bitmap_frame_guard =
-                block_buffer_pool_->access_frame_lock(index.block_id);
-            LCBlock &bitmap_block = bitmap_frame_guard.frame->block;
-
-            uint8_t *bitmap_data = block_as(&bitmap_block);
-            LC_ASSERT(bitmap_data[index.byte_offset] & (1 << index.bit_offset),
-                      "Block is not allocated");
-
-            // clear the block data
-            LCBlockFrameGuard block_frame_guard =
+            LCBlockFrameGuard data_guard =
                 block_buffer_pool_->access_frame_lock(block_id);
-            LCBlock &block = block_frame_guard.frame->block;
-            block_clear(&block);
-            block_frame_guard.mark_dirty();
 
-            bitmap_data[index.byte_offset] &= ~(1 << index.bit_offset);
-            bitmap_frame_guard.mark_dirty();
+            block_clear(&data_guard.frame->block);
+            data_guard.mark_dirty();
+        }
+        {
+            LCBlockFrameGuard bmp_guard =
+                block_buffer_pool_->access_frame_lock(index.block_id);
+
+            uint8_t *bmp = block_as(&bmp_guard.frame->block);
+            LC_ASSERT(bmp[index.byte_offset] & (1 << index.bit_offset),
+                      "Block is not allocated");
+            bmp[index.byte_offset] &= ~(1 << index.bit_offset);
+            bmp_guard.mark_dirty();
         }
     }
 
@@ -159,6 +169,7 @@ private:
     LCBlockBufferPool  *block_buffer_pool_;
     const LCSuperBlock *super_block_;
     uint32_t            block_bitmap_size_;
+    LCBitmapIndex       data_start_index_;
 };
 
 LC_FILESYSTEM_NAMESPACE_END

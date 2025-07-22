@@ -9,7 +9,6 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
-#include <iostream>
 #include <mutex>
 #include <shared_mutex>
 #include <thread>
