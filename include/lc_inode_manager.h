@@ -3,14 +3,17 @@
 #ifndef LC_INODE_MANAGER_H
 #define LC_INODE_MANAGER_H
 
+#include <sys/types.h>
+
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <string>
 
 #include "lc_block.h"
-#include "lc_block_buffer.h"
 #include "lc_block_manager.h"
 #include "lc_configs.h"
+#include "lc_exception.h"
 #include "lc_inode.h"
 #include "lc_inode_buffer.h"
 #include "lc_memory.h"
@@ -18,9 +21,6 @@
 
 LC_NAMESPACE_BEGIN
 LC_FILESYSTEM_NAMESPACE_BEGIN
-
-// TODO: change read and write methods to use LCBlockBufferPool
-// TODO: add caching mechanism for frequently accessed inodes
 
 class LCInodeManager {
 #if defined(DEBUG) || defined(_DEBUG)
@@ -41,10 +41,8 @@ public:
     LCInodeManager &operator=(LCInodeManager &&)      = delete;
 
     LC_EXPLICIT LCInodeManager(const LCSuperBlock &block_header,
-                               LCBlockBufferPool   *block_buffer_pool,
-                               LCInodeBufferPool   *inode_buffer_pool,
-                               LCBlockManager      *block_manager) :
-        block_buffer_pool_ {block_buffer_pool},
+                               LCInodeBufferPool  *inode_buffer_pool,
+                               LCBlockManager     *block_manager) :
         inode_buffer_pool_ {inode_buffer_pool},
         block_manager_ {block_manager},
         inode_cache_info_ {} {
@@ -56,7 +54,7 @@ public:
             lc_ceil_divide_int32_t(inode_cache_info_.inode_count, 8);
         inode_cache_info_.inode_bitmap_block_count =
             lc_ceil_divide_int32_t(inode_cache_info_.inode_bitmap_size,
-                                DEFAULT_BLOCK_SIZE);
+                                   DEFAULT_BLOCK_SIZE);
         inode_cache_info_.inode_bitmap_start = block_header.inode_bitmap_start;
         inode_cache_info_.inode_bitmap_size =
             inode_cache_info_.inode_bitmap_size;
@@ -108,7 +106,7 @@ public:
     void free_inode(uint32_t ino) {
         LC_ASSERT(ino < inode_cache_info_.inode_count,
                   "Inode number out of range");
-        // TODO: re write this function
+        LC_ASSERT(test_inode_bitmap_bit(ino), "Inode is not allocated");
         {
             LCInodeFrameGuard inode_guard =
                 inode_buffer_pool_->access_frame_lock(ino);
@@ -118,23 +116,20 @@ public:
                 inode_guard.mark_dirty();
             } else {
                 truncate_inode(&frame->inode);
-                // clear metadata
+                // Clear metadata, actually we do not need to clear metadata,
+                // next time when we alloc it will be reinitialized to default
+                // value
                 clear_inode_bitmap_bit(ino);
             }
-            inode_buffer_pool_->unpin_inode(ino);
+            inode_guard.mark_dirty();
         }
     }
 
-    /*
-     * load_inode():
-     * └─ read inode from the block manager
-     */
     LCInode load_inode(uint32_t ino) {
         LC_ASSERT(ino < inode_cache_info_.inode_count,
                   "Inode number out of range");
         LCInode inode {};
         inode_buffer_pool_->read_inode(ino, inode);
-        inode_buffer_pool_->unpin_inode(ino);
         return inode;
     }
 
@@ -153,12 +148,83 @@ public:
         // blockManager_->write_block(block_index, inode_block);
     }
 
-    // uint32_t get_block_id(LCInode &inode, uint32_t file_blk, bool allocate);
+    // FIXME: Change inode to inode_id or write a inode_id version
+    uint32_t get_block_id(LCInode &inode, uint32_t file_blk, bool allocate) {
+        LC_ASSERT(
+            file_blk <
+                LC_PTRS_PRE_BLOCK + LC_PTRS_PRE_BLOCK * LC_PTRS_PRE_BLOCK +
+                    LC_PTRS_PRE_BLOCK * LC_PTRS_PRE_BLOCK * LC_PTRS_PRE_BLOCK,
+            "Invalid file block");
 
-    // void read_file_block(LCInode &inode, uint32_t file_blk, char *buf);
-    // void write_file_block(LCInode &inode, uint32_t file_blk, const char
-    // *buf);
-    // TODO: change block manager to use LCBlockBufferPool
+        if (file_blk < LC_DIRECT_PTRS) {
+            if (inode.block_ptr[file_blk] == LC_BLOCK_ILLEGAL_ID) {
+                if (!allocate) {
+                    return LC_BLOCK_ILLEGAL_ID;
+                }
+                inode.block_ptr[file_blk] = block_manager_->alloc_block();
+                inode.blocks++;
+            }
+            return inode.block_ptr[file_blk];
+        }
+
+        // [12, 15)
+        for (uint32_t i = LC_DIRECT_PTRS; i < LC_BLOCK_PTRS_SIZE; ++i) {
+            file_blk -= LC_PTRS_PRE_BLOCK;
+            if (file_blk < LC_PTRS_PRE_BLOCK) {
+                return get_indirect_block_id(inode.block_ptr[i],
+                                             file_blk,
+                                             i - LC_DIRECT_PTRS + 1,
+                                             allocate);
+            }
+        }
+        return LC_BLOCK_ILLEGAL_ID;
+    }
+
+    // TODO: Implement read file and write file one block per time,
+    // return error code if block is not read
+    void read_file_block(uint32_t inode_id, uint32_t file_blk, char *buf) {
+        LC_ASSERT(
+            file_blk <
+                LC_PTRS_PRE_BLOCK + LC_PTRS_PRE_BLOCK * LC_PTRS_PRE_BLOCK +
+                    LC_PTRS_PRE_BLOCK * LC_PTRS_PRE_BLOCK * LC_PTRS_PRE_BLOCK,
+            "Invalid file block");
+        {
+            LCInodeFrameGuard inode_guard =
+                inode_buffer_pool_->access_frame_lock(inode_id);
+            auto    &frame    = inode_guard.frame;
+            uint32_t block_id = get_block_id(frame->inode, file_blk, false);
+            // FUTURE: maybe we should return an error code here
+            if (block_id == LC_BLOCK_ILLEGAL_ID) {
+                lc_memset(buf, 0, DEFAULT_BLOCK_SIZE);
+                return;  // Block not allocated
+            }
+            block_manager_->read_block(block_id, buf, DEFAULT_BLOCK_SIZE);
+        }
+    }
+
+    void write_file_block(uint32_t inode_id, uint32_t file_blk,
+                          const char *buf) {
+        LC_ASSERT(
+            file_blk <
+                LC_PTRS_PRE_BLOCK + LC_PTRS_PRE_BLOCK * LC_PTRS_PRE_BLOCK +
+                    LC_PTRS_PRE_BLOCK * LC_PTRS_PRE_BLOCK * LC_PTRS_PRE_BLOCK,
+            "Invalid file block");
+        {
+            LCInodeFrameGuard inode_guard =
+                inode_buffer_pool_->access_frame_lock(inode_id);
+            auto    &frame    = inode_guard.frame;
+            uint32_t block_id = get_block_id(frame->inode, file_blk, true);
+            // FUTURE: maybe we should return an error code here
+            if (block_id == LC_BLOCK_ILLEGAL_ID) {
+                LC_ASSERT(false, "Block not allocated, this should not happen");
+                return;  // Block not allocated
+            }
+            block_manager_->write_block(block_id, buf, DEFAULT_BLOCK_SIZE);
+            frame->inode.blocks++;
+            inode_guard.mark_dirty();
+        }
+    }
+
     void truncate_inode(LCInode *inode) {
         for (uint32_t i = 0; i < LC_DIRECT_PTRS; ++i) {
             if (inode->block_ptr[i] != LC_BLOCK_ILLEGAL_ID) {
@@ -182,12 +248,70 @@ public:
     // void update_mtime(LCInode &inode);
     // void update_ctime(LCInode &inode);
 
-    // Stat stat_inode(const LCInode &inode);
+    Stat stat_inode(const uint32_t inode_id) {
+        LC_ASSERT(inode_id < inode_cache_info_.inode_count,
+                  "Inode ID out of range");
+        LCInode inode {};
+        inode_buffer_pool_->read_inode(inode_id, inode);
+        Stat stat {};
+        stat.ino    = inode_id;
+        stat.mode   = inode.mode;
+        stat.uid    = inode.uid;
+        stat.gid    = inode.gid;
+        stat.size   = inode.size;
+        stat.blocks = inode.blocks;
+        // stat.st_atime    = inode.atime;
+        // stat.st_mtime    = inode.mtime;
+        // stat.st_ctime    = inode.ctime;
+        return stat;
+    }
 
-    // uint32_t lookup(const LCInode &dir_inode, const std::string &name);
-    // void     add_dir_entry(LCInode &dir_inode, const std::string &name,
-    //                        uint32_t child_ino);
-    // void     remove_dir_entry(LCInode &dir_inode, const std::string &name);
+    // Return Error code
+    uint32_t create_directory(uint32_t parent_ino, const std::string &name,
+                              uint32_t uid, uint32_t gid) {
+        uint32_t name_len = name.length();
+        LC_ASSERT(name_len >= 0, "Name length is negative");
+        if (name_len > LC_FILE_NAME_MAX_LEN || name_len == 0) {
+            throw LCInvalidFileLenError(name_len);
+        }
+
+        uint32_t ino = alloc_inode(LC_S_IFDIR, uid, gid);
+        {
+            LCInodeFrameGuard parent_inode_guard =
+                inode_buffer_pool_->access_frame_lock(parent_ino);
+            if (lookup(parent_inode_guard.frame->inode, name) !=
+                LC_BLOCK_ILLEGAL_ID) {
+                throw LCFileExistsError(name);
+            }
+
+            LCInodeFrameGuard current_inode_guard =
+                inode_buffer_pool_->access_frame_lock(ino);
+            add_dir_entry(current_inode_guard.frame->inode,
+                          LC_CURRUNT_DIRECTORY,
+                          ino);
+            add_dir_entry(current_inode_guard.frame->inode,
+                          LC_PARENT_DIRECTORY,
+                          parent_ino);
+            current_inode_guard.mark_dirty();
+            add_dir_entry(parent_inode_guard.frame->inode, name, ino);
+            parent_inode_guard.mark_dirty();
+        }
+        return ino;
+    }
+
+    void add_dir_entry(uint32_t cur_inode_id, const std::string &name,
+                       uint32_t child_inode_id) {
+        LCInodeFrameGuard inode_guard =
+            inode_buffer_pool_->access_frame_lock(cur_inode_id);
+        add_dir_entry(inode_guard.frame->inode, name, child_inode_id);
+    }
+
+    void remove_dir_entry(uint32_t cur_inode_id, const std::string &name) {
+        LCInodeFrameGuard inode_guard =
+            inode_buffer_pool_->access_frame_lock(cur_inode_id);
+        remove_dir_entry(inode_guard.frame->inode, name);
+    }
+
 
 private:
 
@@ -215,8 +339,7 @@ private:
             return;
         }
         LCBlock ptr_block {};
-        block_buffer_pool_->read_block(block_id, ptr_block);
-        block_buffer_pool_->unpin_block(block_id);
+        block_manager_->read_block(block_id, ptr_block);
         uint32_t *ptrs = reinterpret_cast<uint32_t *>(block_as(&ptr_block));
         for (uint32_t i = 0; i < LC_PTRS_PRE_BLOCK; ++i) {
             if (ptrs[i] == LC_BLOCK_ILLEGAL_ID) {
@@ -241,7 +364,7 @@ private:
         for (uint32_t i = 0; i < inode_cache_info_.inode_bitmap_block_count;
              ++i) {
             block_index = inode_cache_info_.inode_bitmap_start + i;
-            block_buffer_pool_->read_block(block_index, inode_bitmap_block);
+            block_manager_->read_block(block_index, inode_bitmap_block);
 
             offset = i * DEFAULT_BLOCK_SIZE;
             size   = std::min<uint32_t>(
@@ -250,8 +373,6 @@ private:
             lc_memcpy(inode_bitmap_ + offset,
                       block_as(&inode_bitmap_block),
                       size);
-
-            block_buffer_pool_->unpin_block(block_index);
         }
     }
 
@@ -270,8 +391,7 @@ private:
                       inode_bitmap_ + offset,
                       size);
             block_index = inode_cache_info_.inode_bitmap_start + i;
-            block_buffer_pool_->write_block(block_index, inode_bitmap_block);
-            block_buffer_pool_->unpin_block(block_index);
+            block_manager_->write_block(block_index, inode_bitmap_block);
         }
     }
 
@@ -315,13 +435,163 @@ private:
         inode_last_hint_ = 0;  // No inodes allocated, start from 0
     }
 
+    // Since logically we locked the inode for the block, so we can assume
+    // that the ptr block we read is multi-thread safe.
+    uint32_t get_indirect_block_id(uint32_t &block_ptr, uint32_t file_blk,
+                                   uint32_t level, bool allocate) {
+        LC_ASSERT(level > 0 && level <= 3, "Invalid indirect level");
+        if (block_ptr == LC_BLOCK_ILLEGAL_ID) {
+            if (!allocate) {
+                return LC_BLOCK_ILLEGAL_ID;
+            }
+            block_ptr = block_manager_->alloc_block();
+        }
+        LCBlock ptr_block {};
+        block_manager_->read_block(block_ptr, ptr_block);
+        uint32_t *ptrs = lc_uint8_array_to_uint32_array(block_as(&ptr_block));
+
+        uint32_t index = 0;
+        switch (level) {
+            case 1 : index = file_blk; break;
+            case 2 : index = file_blk / LC_PTRS_PRE_BLOCK; break;
+            case 3 :
+                index = file_blk / (LC_PTRS_PRE_BLOCK * LC_PTRS_PRE_BLOCK);
+                break;
+            default : LC_ASSERT(false, "Invalid indirect level");
+        }
+
+        LC_ASSERT(index < LC_PTRS_PRE_BLOCK, "Invalid indirect block index");
+
+        if (level == 1) {
+            if (ptrs[index] == LC_BLOCK_ILLEGAL_ID && allocate) {
+                ptrs[index] = block_manager_->alloc_block();
+                block_manager_->write_block(block_ptr, ptr_block);
+            }
+            return ptrs[index];
+        } else {
+            uint32_t next_block_offset = 0;
+            switch (level) {
+                case 2 :
+                    next_block_offset = file_blk % LC_PTRS_PRE_BLOCK;
+                    break;
+                case 3 :
+                    next_block_offset =
+                        (index / LC_PTRS_PRE_BLOCK) % LC_PTRS_PRE_BLOCK;
+                    break;
+                default : LC_ASSERT(false, "Invalid indirect level");
+            }
+            return get_indirect_block_id(ptrs[index],
+                                         next_block_offset,
+                                         level - 1,
+                                         allocate);
+        }
+        return LC_BLOCK_ILLEGAL_ID;  // Unreachable, but avoids compiler
+                                     // warning
+    }
+
+    uint32_t lookup(const LCInode &dir_inode, const std::string &name) {
+        for (uint32_t i = 0; i < dir_inode.blocks; ++i) {
+            uint32_t block_id =
+                get_block_id(const_cast<LCInode &>(dir_inode), i, false);
+            if (block_id == LC_BLOCK_ILLEGAL_ID) {
+                continue;
+            }
+
+            LCBlock block {};
+            block_manager_->read_block(block_id, block);
+            LCDirEntry *dir_entries =
+                reinterpret_cast<LCDirEntry *>(block_as(&block));
+            for (uint32_t j = 0; j < LC_DIRECTORY_ENTRIES_PER_BLOCK; ++j) {
+                if (dir_entries[j].inode_id == LC_INODE_ILLEGAL_ID) {
+                    continue;  // Skip empty entries
+                }
+                if (dir_entries[j].name_len == name.length() &&
+                    strncmp(dir_entries[j].name,
+                            name.c_str(),
+                            dir_entries[j].name_len) == 0) {
+                    return dir_entries[j].inode_id;  // Found
+                }
+            }
+        }
+        return LC_BLOCK_ILLEGAL_ID;  // Not found
+    }
+
+    void add_dir_entry(LCInode &dir_inode, const std::string &name,
+                       uint32_t child_ino) {
+        LC_ASSERT(name.length() < 0, "Name length is negative");
+        if (name.length() == 0 || name.length() > LC_FILE_NAME_MAX_LEN) {
+            throw LCInvalidFileLenError(name.length());
+        }
+        for (uint32_t i = 0; i < dir_inode.blocks; ++i) {
+            uint32_t block_id = get_block_id(dir_inode, i, false);
+            if (block_id == LC_BLOCK_ILLEGAL_ID) {
+                continue;  // Block not allocated
+            }
+            LCBlock block {};
+            block_manager_->read_block(block_id, block);
+            LCDirEntry *dir_entries =
+                reinterpret_cast<LCDirEntry *>(block_as(&block));
+            for (uint32_t j = 0; j < LC_DIRECTORY_ENTRIES_PER_BLOCK; ++j) {
+                if (dir_entries[j].inode_id != LC_INODE_ILLEGAL_ID) {
+                    continue;
+                }
+                // Found an empty entry
+                dir_entries[j].inode_id = child_ino;
+                dir_entries[j].name_len = name.length();
+                lc_memcpy(dir_entries[j].name, name.c_str(), name.length());
+                block_manager_->write_block(block_id, block);
+                return;  // Entry added successfully
+            }
+        }
+
+        uint32_t new_block_id = get_block_id(dir_inode, dir_inode.blocks, true);
+        dir_inode.blocks++;
+        LCBlock new_block {};
+        block_clear(&new_block);
+        LCDirEntry *new_dir_entries =
+            reinterpret_cast<LCDirEntry *>(block_as(&new_block));
+        for (uint32_t i = 0; i < LC_DIRECTORY_ENTRIES_PER_BLOCK; ++i) {
+            new_dir_entries[i].inode_id = LC_INODE_ILLEGAL_ID;
+        }
+        new_dir_entries[0].inode_id = child_ino;
+        new_dir_entries[0].name_len = name.length();
+        lc_memcpy(new_dir_entries[0].name, name.c_str(), name.length());
+        block_manager_->write_block(new_block_id, new_block);
+    }
+
+    void remove_dir_entry(LCInode &dir_inode, const std::string &name) {
+        for (uint32_t i = 0; i < dir_inode.blocks; ++i) {
+            uint32_t block_id = get_block_id(dir_inode, i, false);
+            if (block_id == LC_BLOCK_ILLEGAL_ID) {
+                continue;
+            }
+            LCBlock block {};
+            block_manager_->read_block(block_id, block);
+            LCDirEntry *dir_entries =
+                reinterpret_cast<LCDirEntry *>(block_as(&block));
+            for (uint32_t j = 0; j < LC_DIRECTORY_ENTRIES_PER_BLOCK &&
+                                 dir_entries[j].inode_id != LC_INODE_ILLEGAL_ID;
+                 ++j) {
+                if (dir_entries[j].name_len == name.length() &&
+                    strncmp(dir_entries[j].name,
+                            name.c_str(),
+                            dir_entries[j].name_len) == 0) {
+                    // Found the entry to remove
+                    dir_entries[j].inode_id = LC_INODE_ILLEGAL_ID;
+                    block_manager_->write_block(block_id, block);
+                    return;  // Entry removed successfully
+                }
+            }
+        }
+    }
+
     // private
     // const LCBlockManager &blockManager_;
-    LCBlockBufferPool *block_buffer_pool_;
     LCInodeBufferPool *inode_buffer_pool_;
     LCBlockManager    *block_manager_;
-    uint8_t           *inode_bitmap_;
-    uint32_t           inode_last_hint_;
+    // TODO: Move this to BitmapCache
+    uint8_t *inode_bitmap_;
+    uint32_t inode_last_hint_;
 
     struct {
         uint32_t inode_count;

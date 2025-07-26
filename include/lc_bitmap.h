@@ -24,6 +24,11 @@ inline LCBitmapIndex lc_cal_bitmap_index(uint32_t block_offset, uint32_t id) {
     return index;
 }
 
+class LCBitmapCache {
+// TODO: Implement a bitmap cache for block manager and inode manager
+// FUTURE:
+};
+
 LC_FILESYSTEM_NAMESPACE_END
 LC_NAMESPACE_END
 

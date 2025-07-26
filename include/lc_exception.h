@@ -116,6 +116,20 @@ public:
         FileSystemError("Image read error: " + message) {}
 };
 
+// ----------- File Operation Errors -----------
+class LCInvalidFileLenError : public FileSystemError {
+public:
+    LC_EXPLICIT LCInvalidFileLenError(uint64_t len) :
+        FileSystemError("Invalid file length: " + std::to_string(len)) {}
+};
+
+class LCFileExistsError : public FileSystemError {
+public:
+    LC_EXPLICIT LCFileExistsError(const std::string &filename) :
+        FileSystemError("File already exists: " + filename) {}
+};
+
+
 LC_FILESYSTEM_NAMESPACE_END
 LC_NAMESPACE_END
 
