@@ -31,6 +31,55 @@ template <typename T> void lc_free_array(T *ptr) {
     delete[] ptr;
 }
 
+template <typename T, typename... Args>
+T *lc_construct_array(size_t count, Args &&...args) {
+    T *ptr = static_cast<T *>(::operator new(count * sizeof(T), std::nothrow));
+    if (!ptr) {
+        return nullptr;
+    }
+    size_t i = 0;
+    try {
+        for (; i < count; ++i) {
+            new (&ptr[i]) T(std::forward<Args>(args)...);
+        }
+    } catch (...) {
+        for (size_t j = 0; j < i; ++j) {
+            ptr[j].~T();
+        }
+        ::operator delete(ptr);
+        throw;
+    }
+    return ptr;
+}
+
+template <typename T, typename Factory>
+T *lc_construct_array_indexed(size_t count, Factory &&factory) {
+    T *ptr = static_cast<T *>(::operator new(count * sizeof(T), std::nothrow));
+    if (!ptr) {
+        return nullptr;
+    }
+    size_t i = 0;
+    try {
+        for (; i < count; ++i) {
+            new (&ptr[i]) T(factory(i));
+        }
+    } catch (...) {
+        for (size_t j = 0; j < i; ++j) {
+            ptr[j].~T();
+        }
+        ::operator delete(ptr);
+        throw;
+    }
+    return ptr;
+}
+
+template <typename T> void lc_destroy_array(T *ptr, size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+        ptr[i].~T();
+    }
+    ::operator delete(ptr);
+}
+
 inline std::atomic_flag *lc_alloc_atomic_flag_array(size_t count) {
     auto ptr = new (std::nothrow) std::atomic_flag[count];
     if (!ptr) {

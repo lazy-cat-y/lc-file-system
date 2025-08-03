@@ -6,12 +6,17 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 
 #include "lc_configs.h"
+#include "lc_exception.h"
 #include "lc_memory.h"
 
 LC_NAMESPACE_BEGIN
 LC_FILESYSTEM_NAMESPACE_BEGIN
+
+// Based on Vyukov's MPMC queue implementation
+// TODO finish the description of the algorithm
 
 #define __LC_CACHE_LINE_SIZE 64
 typedef char __lc_cacheline_pad_t[__LC_CACHE_LINE_SIZE];
@@ -34,11 +39,12 @@ public:
         lc_free_array(buffer_);
     }
 
+    LCMPMCQueue()                               = delete;
     LCMPMCQueue(const LCMPMCQueue &)            = delete;
     LCMPMCQueue &operator=(const LCMPMCQueue &) = delete;
     LCMPMCQueue(LCMPMCQueue &&)                 = delete;
     LCMPMCQueue &operator=(LCMPMCQueue &&)      = delete;
-    
+
     bool enqueue(const T &item) {
         __lc_mpmc_queue_cell_t *cell;
         size_t pos = enqueue_index_.load(std::memory_order_relaxed);
@@ -106,6 +112,116 @@ private:
     __lc_cacheline_pad_t pad2_;
     std::atomic<size_t>  dequeue_index_;
     __lc_cacheline_pad_t pad3_;
+};
+
+enum class LCWriteTaskPriority {
+    Critical,        // Logs, metadata, super blocks
+    High,            // inode, time, directory entries
+    Normal,          // file data
+    Low,
+    Background,      // background fllushes, prewrites, etc.
+    NUM_PRIORITIES,  // Number of priorities defined
+};
+
+enum class LCReadTaskPriority {
+    Critical,        // metadata, directory traversal, opening file headers
+    High,            // user requests, latency-sensitive
+    Normal,          // sequential reads, page loading, etc.
+    Low,
+    Background,      // preread, prefetch, scan, etc.
+    NUM_PRIORITIES,  // Number of priorities defined
+};
+
+template <typename PriorityType> struct LCPriorityTraits;
+
+template <> struct LCPriorityTraits<LCWriteTaskPriority> {
+    static LC_CONSTEXPR size_t
+    get_priority_queue_size(LCWriteTaskPriority pri) {
+        switch (pri) {
+            case LCWriteTaskPriority::Critical   : return 64;
+            case LCWriteTaskPriority::High       : return 128;
+            case LCWriteTaskPriority::Normal     : return 256;
+            case LCWriteTaskPriority::Low        : return 512;
+            case LCWriteTaskPriority::Background : return 1024;
+            default                              : return 0;  // Invalid priority
+        }
+    }
+};
+
+template <> struct LCPriorityTraits<LCReadTaskPriority> {
+    static LC_CONSTEXPR size_t get_priority_queue_size(LCReadTaskPriority pri) {
+        switch (pri) {
+            case LCReadTaskPriority::Critical   : return 64;
+            case LCReadTaskPriority::High       : return 128;
+            case LCReadTaskPriority::Normal     : return 256;
+            case LCReadTaskPriority::Low        : return 512;
+            case LCReadTaskPriority::Background : return 1024;
+            default                             : return 0;  // Invalid priority
+        }
+    }
+};
+
+template <class T, class PriorityType> class LCMPMCMultiPriorityQueue {
+    static_assert(
+        std::is_same<PriorityType, LCWriteTaskPriority>::value ||
+            std::is_same<PriorityType, LCReadTaskPriority>::value,
+        "Invalid priority type, must be either LCWriteTaskPriority or LCReadTaskPriority");
+public:
+
+    LCMPMCMultiPriorityQueue() {
+        size_t num_priorities =
+            static_cast<size_t>(PriorityType::NUM_PRIORITIES);
+        try {
+            queues_ = lc_construct_array_indexed<LCMPMCQueue<T>>(num_priorities,
+                                                                 [](size_t i) {
+                return LCPriorityTraits<PriorityType>::get_priority_queue_size(
+                    static_cast<PriorityType>(i));
+            });
+            if (!queues_) {
+                throw LCBadAllocError(
+                    "Failed to allocate multi-priority queue");
+            }
+        } catch (const LCBadAllocError &e) {
+            // print error and panic
+            lc_fatal_exception(e);
+        }
+    }
+
+    ~LCMPMCMultiPriorityQueue() {
+        lc_destroy_array(queues_,
+                         static_cast<size_t>(PriorityType::NUM_PRIORITIES));
+    }
+
+    LCMPMCMultiPriorityQueue(const LCMPMCMultiPriorityQueue &) = delete;
+    LCMPMCMultiPriorityQueue &operator=(const LCMPMCMultiPriorityQueue &) =
+        delete;
+    LCMPMCMultiPriorityQueue(LCMPMCMultiPriorityQueue &&)            = delete;
+    LCMPMCMultiPriorityQueue &operator=(LCMPMCMultiPriorityQueue &&) = delete;
+
+    template <typename P            = PriorityType,
+              std::enable_if_t<std::is_same_v<P, LCWriteTaskPriority> ||
+                                   std::is_same_v<P, LCReadTaskPriority>,
+                               int> = 0>
+    bool enqueue(const T &item, P priority) {
+        size_t index = static_cast<size_t>(priority);
+        LC_ASSERT(index < static_cast<size_t>(PriorityType::NUM_PRIORITIES),
+                  "Invalid priority index");
+        return queues_[index].enqueue(item);
+    }
+
+    template <typename P            = PriorityType,
+              std::enable_if_t<std::is_same_v<P, LCWriteTaskPriority> ||
+                                   std::is_same_v<P, LCReadTaskPriority>,
+                               int> = 0>
+    bool dequeue(T &item, P priority) {
+        size_t index = static_cast<size_t>(priority);
+        LC_ASSERT(index < static_cast<size_t>(PriorityType::NUM_PRIORITIES),
+                  "Invalid priority index");
+        return queues_[index].dequeue(item);
+    }
+
+private:
+    LCMPMCQueue<T> *queues_;
 };
 
 LC_FILESYSTEM_NAMESPACE_END
