@@ -68,6 +68,7 @@ BraceWrapping:
 BracedInitializerIndentWidth: 4
 BreakAfterAttributes: Never
 BreakBeforeBinaryOperators: None
+BreakTemplateDeclarations: Yes
 BreakBeforeConceptDeclarations: Always
 BreakBeforeInlineASMColon: OnlyMultiline
 BreakBeforeTernaryOperators: true

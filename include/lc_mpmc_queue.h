@@ -21,7 +21,8 @@ LC_FILESYSTEM_NAMESPACE_BEGIN
 #define __LC_CACHE_LINE_SIZE 64
 typedef char __lc_cacheline_pad_t[__LC_CACHE_LINE_SIZE];
 
-template <typename T> class LCMPMCQueue {
+template <typename T>
+class LCMPMCQueue {
 public:
 
     LCMPMCQueue(size_t buffer_size) : buffer_mask_(buffer_size - 1) {
@@ -132,9 +133,11 @@ enum class LCReadTaskPriority {
     NUM_PRIORITIES,  // Number of priorities defined
 };
 
-template <typename PriorityType> struct LCPriorityTraits;
+template <typename PriorityType>
+struct LCPriorityTraits;
 
-template <> struct LCPriorityTraits<LCWriteTaskPriority> {
+template <>
+struct LCPriorityTraits<LCWriteTaskPriority> {
     static LC_CONSTEXPR size_t
     get_priority_queue_size(LCWriteTaskPriority pri) {
         switch (pri) {
@@ -148,7 +151,8 @@ template <> struct LCPriorityTraits<LCWriteTaskPriority> {
     }
 };
 
-template <> struct LCPriorityTraits<LCReadTaskPriority> {
+template <>
+struct LCPriorityTraits<LCReadTaskPriority> {
     static LC_CONSTEXPR size_t get_priority_queue_size(LCReadTaskPriority pri) {
         switch (pri) {
             case LCReadTaskPriority::Critical   : return 64;
@@ -161,7 +165,8 @@ template <> struct LCPriorityTraits<LCReadTaskPriority> {
     }
 };
 
-template <class T, class PriorityType> class LCMPMCMultiPriorityQueue {
+template <class T, class PriorityType>
+class LCMPMCMultiPriorityQueue {
     static_assert(
         std::is_same<PriorityType, LCWriteTaskPriority>::value ||
             std::is_same<PriorityType, LCReadTaskPriority>::value,
@@ -206,7 +211,11 @@ public:
         size_t index = static_cast<size_t>(priority);
         LC_ASSERT(index < static_cast<size_t>(PriorityType::NUM_PRIORITIES),
                   "Invalid priority index");
-        return queues_[index].enqueue(item);
+        if (queues_[index].enqueue(item)) {
+            size_.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+        return false;  // Queue is full
     }
 
     template <typename P            = PriorityType,
@@ -217,11 +226,19 @@ public:
         size_t index = static_cast<size_t>(priority);
         LC_ASSERT(index < static_cast<size_t>(PriorityType::NUM_PRIORITIES),
                   "Invalid priority index");
-        return queues_[index].dequeue(item);
+        if (size_.load(std::memory_order_relaxed) == 0) {
+            return false;  // Queue is empty
+        }
+        if (queues_[index].dequeue(item)) {
+            size_.fetch_sub(1, std::memory_order_relaxed);
+            return true;
+        }
+        return false;  // Queue is empty or dequeue failed
     }
 
 private:
-    LCMPMCQueue<T> *queues_;
+    LCMPMCQueue<T>     *queues_;
+    std::atomic<size_t> size_;
 };
 
 LC_FILESYSTEM_NAMESPACE_END
