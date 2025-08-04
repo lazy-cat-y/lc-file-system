@@ -77,7 +77,7 @@ template <typename T> void lc_destroy_array(T *ptr, size_t count) {
     for (size_t i = 0; i < count; ++i) {
         ptr[i].~T();
     }
-    ::operator delete(ptr);
+    ::operator delete(ptr, std::nothrow);
 }
 
 inline std::atomic_flag *lc_alloc_atomic_flag_array(size_t count) {

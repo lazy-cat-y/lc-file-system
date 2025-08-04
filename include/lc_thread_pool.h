@@ -69,7 +69,6 @@ struct LCContext<LCTreadPoolContextMetaData<PriorityType>> {
         metadata     = std::move(other.metadata);
         task         = std::move(other.task);
         cancel_token = std::move(other.cancel_token);
-        other.cancel_token.reset();
     }
 
     LCContext &operator=(LCContext &&other) {
@@ -77,12 +76,12 @@ struct LCContext<LCTreadPoolContextMetaData<PriorityType>> {
             metadata     = std::move(other.metadata);
             task         = std::move(other.task);
             cancel_token = std::move(other.cancel_token);
-            other.cancel_token.reset();
         }
         return *this;
     }
 
     bool is_cancelled() const {
+        LC_ASSERT(cancel_token != nullptr, "cancel_token is nullptr!");
         return cancel_token && cancel_token->load();
     }
 
@@ -187,7 +186,7 @@ public:
             }
             current_index_ = (current_index_ + 1) % num_priorities;
         }
-        if (std::all_of(weights_.back(), weights_.end(), [](uint32_t w) {
+        if (std::all_of(weights_.begin(), weights_.end(), [](uint32_t w) {
             return w == 0;
         })) {
             reset_weights();
@@ -231,7 +230,9 @@ public:
         draining_.store(false);
     }
 
-    ~LCThreadPool() {}
+    ~LCThreadPool() {
+        shutdown();
+    }
 
     bool submit_task(ContextType &&context) {
         {
@@ -266,8 +267,17 @@ public:
     void shutdown() {
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (is_stopped() || is_draining()) {
+                return;
+            }
             stop_.store(true);
             draining_.store(true);
+        }
+
+        cv_.notify_all();  // Notify all threads to wake up and stop
+
+        while (!task_queue_.is_empty()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
         cv_.notify_all();  // Notify all threads to wake up and stop
@@ -311,23 +321,23 @@ private:
     void worker_pool(const std::string &thread_name) {
         // Run the thread's main loop
         LCWeightedRoundRobinScheduler<ContextType, PriorityType> scheduler_;
-
-        ContextType context;
+        ContextType                                              context;
         while (true) {
             {
                 std::unique_lock<std::mutex> lock(mutex_);
                 cv_.wait(lock, [this]() {
                     return stop_.load() || !task_queue_.is_empty();
                 });
-
-                if (stop_.load() && task_queue_.is_empty()) {
-                    break;  // Exit the loop if stopped and no tasks
-                }
             }
             if (scheduler_.try_schedule(task_queue_, context)) {
                 if (!context.is_cancelled()) {
-                    context();  // Execute the task
+                    context();
                 }
+                continue;
+            }
+
+            if (stop_.load() && task_queue_.is_empty()) {
+                break;
             }
         }
     }

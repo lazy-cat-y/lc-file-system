@@ -55,6 +55,12 @@ public:
         FileSystemError("Unsupported block size: " + message) {}
 };
 
+class ImgCreationError : public FileSystemError {
+public:
+    LC_EXPLICIT ImgCreationError(const std::string &message) :
+        FileSystemError("Image creation error: " + message) {}
+};
+
 // ----------- File Operation Errors -----------
 class LCInvalidFileLenError : public FileSystemError {
 public:
@@ -72,9 +78,10 @@ public:
 class LCBadAllocError : public std::bad_alloc {
 public:
     LC_EXPLICIT LCBadAllocError(const std::string &message) :
-        std::bad_alloc(), message_(message) {}
+        std::bad_alloc(),
+        message_(message) {}
 
-    const char* what() const noexcept override {
+    const char *what() const noexcept override {
         return message_.c_str();
     }
 
@@ -88,7 +95,6 @@ LC_NORETURN inline void lc_fatal_exception(const std::exception &e) {
     std::cerr << "Fatal error: " << e.what() << std::endl;
     std::terminate();
 }
-
 
 LC_FILESYSTEM_NAMESPACE_END
 LC_NAMESPACE_END

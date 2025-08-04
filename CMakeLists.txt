@@ -29,9 +29,9 @@ if (ENABLE_MULTITHREAD)
 endif()
 
 # For segmentation fault debugging
-option(ENABLE_ADDRESS_SANITIZER "Enable Address Sanitizer" OFF)
+option(ENABLE_ADDRESS_SANITIZER "Enable Address Sanitizer" ON)
 # For memory leak debugging
-option(ENABLE_VALGRIND "Enable Valgrind" ON)
+option(ENABLE_VALGRIND "Enable Valgrind" OFF)
 
 if (ENABLE_ADDRESS_SANITIZER)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address -fno-omit-frame-pointer -ggdb")

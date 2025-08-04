@@ -28,7 +28,8 @@ public:
     LCMPMCQueue(size_t buffer_size) : buffer_mask_(buffer_size - 1) {
         LC_ASSERT(buffer_size >= 2 && (buffer_size & (buffer_size - 1)) == 0,
                   "Buffer size must be a power of two and at least 2.");
-        buffer_ = lc_alloc_array<T>(buffer_size);
+        // buffer_ = lc_alloc_array<__lc_mpmc_queue_cell_t>(buffer_size);
+        buffer_ = lc_construct_array<__lc_mpmc_queue_cell_t>(buffer_size);
         for (size_t i = 0; i < buffer_size; ++i) {
             buffer_[i].sequence.store(i, std::memory_order_relaxed);
         }
@@ -37,7 +38,7 @@ public:
     }
 
     ~LCMPMCQueue() {
-        lc_free_array(buffer_);
+        lc_destroy_array(buffer_, buffer_mask_ + 1);
     }
 
     LCMPMCQueue()                               = delete;
@@ -72,6 +73,32 @@ public:
         return true;
     }
 
+    bool enqueue(T &&item) {
+        __lc_mpmc_queue_cell_t *cell;
+        size_t pos = enqueue_index_.load(std::memory_order_relaxed);
+        while (true) {
+            cell          = &buffer_[pos & buffer_mask_];
+            size_t   seq  = cell->sequence.load(std::memory_order_acquire);
+            intptr_t diff = (intptr_t)seq - (intptr_t)pos;
+            if (diff == 0) {
+                if (enqueue_index_.compare_exchange_weak(
+                        pos,
+                        pos + 1,
+                        std::memory_order_relaxed)) {
+                    break;
+                }
+            } else if (diff < 0) {
+                return false;  // Queue is full
+            } else {
+                // Wait for the cell to be available
+                pos = enqueue_index_.load(std::memory_order_relaxed);
+            }
+        }
+        cell->data = std::move(item);
+        cell->sequence.store(pos + 1, std::memory_order_release);
+        return true;
+    }
+
     bool dequeue(T &item) {
         __lc_mpmc_queue_cell_t *cell;
         size_t pos = dequeue_index_.load(std::memory_order_relaxed);
@@ -93,7 +120,7 @@ public:
                 pos = dequeue_index_.load(std::memory_order_relaxed);
             }
         }
-        item = cell->data;
+        item = std::move(cell->data);
         cell->sequence.store(pos + buffer_mask_ + 1, std::memory_order_release);
         return true;
     }
@@ -105,14 +132,14 @@ private:
         T                   data;
     } __lc_mpmc_queue_cell_t;
 
-    __lc_cacheline_pad_t pad0_;
-    __lc_mpmc_queue_cell_t const * volatile buffer_;
-    size_t const         buffer_mask_;
-    __lc_cacheline_pad_t pad1_;
-    std::atomic<size_t>  enqueue_index_;
-    __lc_cacheline_pad_t pad2_;
-    std::atomic<size_t>  dequeue_index_;
-    __lc_cacheline_pad_t pad3_;
+    __lc_cacheline_pad_t    pad0_;
+    __lc_mpmc_queue_cell_t *buffer_;
+    size_t const            buffer_mask_;
+    __lc_cacheline_pad_t    pad1_;
+    std::atomic<size_t>     enqueue_index_;
+    __lc_cacheline_pad_t    pad2_;
+    std::atomic<size_t>     dequeue_index_;
+    __lc_cacheline_pad_t    pad3_;
 };
 
 enum class LCWriteTaskPriority {
@@ -190,6 +217,7 @@ public:
             // print error and panic
             lc_fatal_exception(e);
         }
+        size_.store(0, std::memory_order_relaxed);
     }
 
     ~LCMPMCMultiPriorityQueue() {
@@ -222,6 +250,21 @@ public:
               std::enable_if_t<std::is_same_v<P, LCWriteTaskPriority> ||
                                    std::is_same_v<P, LCReadTaskPriority>,
                                int> = 0>
+    bool enqueue(T &&item, P priority) {
+        size_t index = static_cast<size_t>(priority);
+        LC_ASSERT(index < static_cast<size_t>(PriorityType::NUM_PRIORITIES),
+                  "Invalid priority index");
+        if (queues_[index].enqueue(std::move(item))) {
+            size_.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+        return false;  // Queue is full
+    }
+
+    template <typename P            = PriorityType,
+              std::enable_if_t<std::is_same_v<P, LCWriteTaskPriority> ||
+                                   std::is_same_v<P, LCReadTaskPriority>,
+                               int> = 0>
     bool dequeue(T &item, P priority) {
         size_t index = static_cast<size_t>(priority);
         LC_ASSERT(index < static_cast<size_t>(PriorityType::NUM_PRIORITIES),
@@ -234,6 +277,10 @@ public:
             return true;
         }
         return false;  // Queue is empty or dequeue failed
+    }
+
+    bool is_empty() const {
+        return size_.load(std::memory_order_relaxed) == 0;
     }
 
 private:
