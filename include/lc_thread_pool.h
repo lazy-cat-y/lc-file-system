@@ -10,7 +10,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <ctime>
-#include <functional>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -19,6 +18,7 @@
 #include "lc_configs.h"
 #include "lc_context.h"
 #include "lc_mpmc_queue.h"
+#include "lc_task.h"
 
 LC_NAMESPACE_BEGIN
 LC_FILESYSTEM_NAMESPACE_BEGIN
@@ -40,20 +40,23 @@ struct LCContext<LCTreadPoolContextMetaData<PriorityType>> {
         "Invalid priority type, must be either LCWriteTaskPriority or LCReadTaskPriority");
     LCTreadPoolContextMetaData<PriorityType> metadata;
     // std::bind(f, args...) or a lambda function
-    std::function<void()>              task;
+    // std::make_shared<LambdaTask<std::function<void()>>>(std::bind(&Foo::bar,
+    // &foo));
+    // std::make_shared<LambdaTask<decltype(real_lambda)>>(std::move(real_lambda));
+    std::shared_ptr<LCTask>            task;
     std::shared_ptr<std::atomic<bool>> cancel_token;
 
     LCContext() = default;
 
     LCContext(const LCTreadPoolContextMetaData<PriorityType> &meta,
-              std::function<void()>                           data) :
+              std::shared_ptr<LCTask>                         data) :
         metadata(meta),
         task(std::move(data)) {
         cancel_token = std::make_shared<std::atomic<bool>>(false);
     }
 
     LCContext(const LCTreadPoolContextMetaData<PriorityType> &meta,
-              std::function<void()>                           data,
+              std::shared_ptr<LCTask>                         data,
               std::shared_ptr<std::atomic<bool>>              cancel_token) :
         metadata(meta),
         task(std::move(data)),
@@ -91,7 +94,7 @@ struct LCContext<LCTreadPoolContextMetaData<PriorityType>> {
 
     void operator()() const {
         if (!is_cancelled() && task) {
-            task();
+            task->run();
         }
     }
 };
@@ -111,7 +114,7 @@ public:
     LCTreadPoolContextFactory &operator=(LCTreadPoolContextFactory &&) = delete;
 
     LCTreadPoolContextFactory(const MetadataType                &metadata,
-                              std::function<void()>              task,
+                              std::shared_ptr<LCTask>            task,
                               std::shared_ptr<std::atomic<bool>> cancel_token) :
         metadata_(metadata),
         task_(std::move(task)),
@@ -123,7 +126,7 @@ public:
 
 private:
     MetadataType                       metadata_;
-    std::function<void()>              task_;
+    std::shared_ptr<LCTask>            task_;
     std::shared_ptr<std::atomic<bool>> cancel_token_;
 };
 
@@ -245,17 +248,13 @@ public:
         return true;
     }
 
-    bool wait_and_submit_task(ContextType &&context) {
-        auto ctx_create = [&]() {
-            return ContextType(context.metadata,
-                               std::move(context.task),
-                               context.cancel_token);
-        };
+    bool wait_and_submit_task(
+        LCTreadPoolContextFactory<PriorityType> &factory) {
         while (true) {
             if (is_stopped()) {
                 return false;  // Cannot submit tasks when stopped
             }
-            ContextType ctx = ctx_create();
+            ContextType ctx = factory.make();
             if (submit_task(std::move(ctx))) {
                 return true;  // Task submitted successfully
             }
