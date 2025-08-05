@@ -6,10 +6,13 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <ctime>
+#include <functional>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -208,6 +211,14 @@ private:
         weights_;
 };
 
+inline void safe_launch_function(std::function<void()> func) {
+    try {
+        func();
+    } catch (const std::exception &e) {
+        // log
+    } catch (...) {}
+}
+
 template <class PriorityType, size_t ThreadCount>
 class LCThreadPool {
     using ContextType = LCContext<LCTreadPoolContextMetaData<PriorityType>>;
@@ -225,9 +236,16 @@ public:
     LCThreadPool &operator=(LCThreadPool &&)      = delete;
 
     LC_EXPLICIT LCThreadPool(const std::string &name) : name_(std::move(name)) {
+        for (size_t i = 0; i < ThreadCount; ++i) {
+            cancel_tokens_[i] = std::make_shared<std::atomic<bool>>(false);
+        }
         launch_worker_threads();
         stop_.store(false);
         draining_.store(false);
+        for (size_t i = 0; i < ThreadCount; ++i) {
+            last_heartbeat_[i].store(std::chrono::steady_clock::now(),
+                                     std::memory_order_relaxed);
+        }
     }
 
     ~LCThreadPool() {
@@ -274,7 +292,8 @@ public:
             draining_.store(true);
         }
 
-        cv_.notify_all();  // Notify all threads to wake up and stop
+        watchdog_cv_.notify_all();  // Notify all threads to wake up and stop
+        cv_.notify_all();           // Notify all threads to wake up and stop
 
         while (!task_queue_.is_empty()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -308,28 +327,38 @@ private:
     void launch_worker_threads() {
         for (size_t i = 0; i < ThreadCount; ++i) {
             threads_[i] = std::thread([this, i]() {
-                size_t      thread_id = i;
-                std::string thread_name =
-                    name_ + "_thread_" + std::to_string(thread_id);
-                pthread_setname_np(pthread_self(), thread_name.c_str());
-                // run
-                worker_pool(thread_name);
+                auto token = cancel_tokens_[i];
+                safe_launch_function([this, i, token]() {
+                    std::string thread_name =
+                        name_ + "_thread_" + std::to_string(i);
+                    pthread_setname_np(pthread_self(), thread_name.c_str());
+                    worker_pool(thread_name, i, token);
+                });
             });
         }
+        watchdog_thread_ = std::thread(
+            [this]() { safe_launch_function([this]() { watchdog_loop(); }); });
     }
 
-    void worker_pool(const std::string &thread_name) {
+    void worker_pool(const std::string &thread_name, size_t thread_index,
+                     std::shared_ptr<std::atomic<bool>> cancel_token) {
         // Run the thread's main loop
         LCWeightedRoundRobinScheduler<ContextType, PriorityType> scheduler_;
         ContextType                                              context;
         while (true) {
+            if (cancel_token->load(std::memory_order_relaxed)) {
+                break;
+            }
             {
                 std::unique_lock<std::mutex> lock(mutex_);
-                cv_.wait(lock, [this]() {
+                cv_.wait_for(lock, std::chrono::milliseconds(5), [this]() {
                     return stop_.load() || !task_queue_.is_empty();
                 });
             }
             if (scheduler_.try_schedule(task_queue_, context)) {
+                last_heartbeat_[thread_index].store(
+                    std::chrono::steady_clock::now(),
+                    std::memory_order_relaxed);
                 if (!context.is_cancelled()) {
                     context();
                 }
@@ -342,11 +371,56 @@ private:
         }
     }
 
+    void watchdog_loop() {
+        const auto timeout_duration =
+            std::chrono::seconds(10);  // Adjust as needed
+        while (!stop_.load()) {
+            std::unique_lock<std::mutex> lock(watchdog_mutex_);
+            watchdog_cv_.wait_for(lock, timeout_duration, [this]() {
+                return stop_.load();
+            });
+            for (size_t i = 0; i < ThreadCount; ++i) {
+                auto last = last_heartbeat_[i].load(std::memory_order_relaxed);
+                if (std::chrono::steady_clock::now() - last >
+                    timeout_duration) {
+                    // TODO log and restart thread
+                    std::string thread_name =
+                        name_ + "_thread_" + std::to_string(i);
+                    std::cerr << "Thread " << thread_name
+                              << " is not responding, restarting...\n";
+
+                    cancel_tokens_[i]->store(true, std::memory_order_relaxed);
+
+                    if (threads_[i].joinable()) {
+                        threads_[i].join();
+                    }
+
+                    cancel_tokens_[i]->store(false, std::memory_order_acq_rel);
+                    last_heartbeat_[i].store(std::chrono::steady_clock::now(),
+                                             std::memory_order_relaxed);
+                    threads_[i] = std::thread([this, i]() {
+                        auto token = cancel_tokens_[i];
+                        safe_launch_function([this, i, token]() {
+                            std::string thread_name =
+                                name_ + "_thread_" + std::to_string(i);
+                            pthread_setname_np(pthread_self(),
+                                               thread_name.c_str());
+                            worker_pool(thread_name, i, token);
+                        });
+                    });
+                }
+            }
+        }
+    }
+
     void join_threads() {
         for (auto &thread : threads_) {
             if (thread.joinable()) {
                 thread.join();
             }
+        }
+        if (watchdog_thread_.joinable()) {
+            watchdog_thread_.join();
         }
     }
 
@@ -358,6 +432,13 @@ private:
     std::atomic<bool>                    draining_;
     std::condition_variable              cv_;
     std::mutex                           mutex_;
+
+    std::array<std::atomic<std::chrono::steady_clock::time_point>, ThreadCount>
+                                                                last_heartbeat_;
+    std::array<std::shared_ptr<std::atomic<bool>>, ThreadCount> cancel_tokens_;
+    std::thread             watchdog_thread_;
+    std::mutex              watchdog_mutex_;
+    std::condition_variable watchdog_cv_;
 };
 
 LC_FILESYSTEM_NAMESPACE_END

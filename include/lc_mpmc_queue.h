@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <type_traits>
 
 #include "lc_configs.h"
@@ -18,18 +19,17 @@ LC_FILESYSTEM_NAMESPACE_BEGIN
 // Based on Vyukov's MPMC queue implementation
 // TODO finish the description of the algorithm
 
-#define __LC_CACHE_LINE_SIZE 64
-typedef char __lc_cacheline_pad_t[__LC_CACHE_LINE_SIZE];
+#define __LC_ALIGNAS_CACHELINE 64
 
-template <typename T>
+template <typename Tp_>
 class LCMPMCQueue {
 public:
 
-    LCMPMCQueue(size_t buffer_size) : buffer_mask_(buffer_size - 1) {
+    LC_EXPLICIT LCMPMCQueue(size_t buffer_size) :
+        buffer_mask_(buffer_size - 1) {
         LC_ASSERT(buffer_size >= 2 && (buffer_size & (buffer_size - 1)) == 0,
                   "Buffer size must be a power of two and at least 2.");
-        // buffer_ = lc_alloc_array<__lc_mpmc_queue_cell_t>(buffer_size);
-        buffer_ = lc_construct_array<__lc_mpmc_queue_cell_t>(buffer_size);
+        buffer_ = std::make_unique<__lc_mpmc_queue_cell_t[]>(buffer_size);
         for (size_t i = 0; i < buffer_size; ++i) {
             buffer_[i].sequence.store(i, std::memory_order_relaxed);
         }
@@ -37,9 +37,7 @@ public:
         dequeue_index_.store(0, std::memory_order_release);
     }
 
-    ~LCMPMCQueue() {
-        lc_destroy_array(buffer_, buffer_mask_ + 1);
-    }
+    ~LCMPMCQueue() = default;
 
     LCMPMCQueue()                               = delete;
     LCMPMCQueue(const LCMPMCQueue &)            = delete;
@@ -47,99 +45,71 @@ public:
     LCMPMCQueue(LCMPMCQueue &&)                 = delete;
     LCMPMCQueue &operator=(LCMPMCQueue &&)      = delete;
 
-    bool enqueue(const T &item) {
-        __lc_mpmc_queue_cell_t *cell;
+    LC_NODISCARD bool enqueue(Tp_ item) {
         size_t pos = enqueue_index_.load(std::memory_order_relaxed);
         while (true) {
-            cell          = &buffer_[pos & buffer_mask_];
-            size_t   seq  = cell->sequence.load(std::memory_order_acquire);
+            __lc_mpmc_queue_cell_t &cell = buffer_[pos & buffer_mask_];
+            size_t   seq  = cell.sequence.load(std::memory_order_acquire);
             intptr_t diff = (intptr_t)seq - (intptr_t)pos;
             if (diff == 0) {
                 if (enqueue_index_.compare_exchange_weak(
                         pos,
                         pos + 1,
                         std::memory_order_relaxed)) {
-                    break;
+                    cell.data = std::move(item);
+                    cell.sequence.store(pos + 1, std::memory_order_release);
+                    return true;  // Successfully enqueued
                 }
             } else if (diff < 0) {
-                return false;  // Queue is full
+                return false;     // Queue is full
             } else {
                 // Wait for the cell to be available
                 pos = enqueue_index_.load(std::memory_order_relaxed);
             }
         }
-        cell->data = item;
-        cell->sequence.store(pos + 1, std::memory_order_release);
-        return true;
+        LC_ASSERT(false, "Unreachable code in enqueue");
+        return false;  // Should never reach here
     }
 
-    bool enqueue(T &&item) {
-        __lc_mpmc_queue_cell_t *cell;
-        size_t pos = enqueue_index_.load(std::memory_order_relaxed);
-        while (true) {
-            cell          = &buffer_[pos & buffer_mask_];
-            size_t   seq  = cell->sequence.load(std::memory_order_acquire);
-            intptr_t diff = (intptr_t)seq - (intptr_t)pos;
-            if (diff == 0) {
-                if (enqueue_index_.compare_exchange_weak(
-                        pos,
-                        pos + 1,
-                        std::memory_order_relaxed)) {
-                    break;
-                }
-            } else if (diff < 0) {
-                return false;  // Queue is full
-            } else {
-                // Wait for the cell to be available
-                pos = enqueue_index_.load(std::memory_order_relaxed);
-            }
-        }
-        cell->data = std::move(item);
-        cell->sequence.store(pos + 1, std::memory_order_release);
-        return true;
-    }
-
-    bool dequeue(T &item) {
-        __lc_mpmc_queue_cell_t *cell;
+    LC_NODISCARD bool dequeue(Tp_ &item) {
         size_t pos = dequeue_index_.load(std::memory_order_relaxed);
         while (true) {
-            cell          = &buffer_[pos & buffer_mask_];
-            size_t   seq  = cell->sequence.load(std::memory_order_acquire);
+            __lc_mpmc_queue_cell_t &cell = buffer_[pos & buffer_mask_];
+            size_t   seq  = cell.sequence.load(std::memory_order_acquire);
             intptr_t diff = (intptr_t)seq - (intptr_t)(pos + 1);
             if (diff == 0) {
                 if (dequeue_index_.compare_exchange_weak(
                         pos,
                         pos + 1,
                         std::memory_order_relaxed)) {
-                    break;
+                    item = std::move(cell.data);
+                    cell.sequence.store(pos + buffer_mask_ + 1,
+                                        std::memory_order_release);
+                    return true;  // Successfully dequeued
                 }
             } else if (diff < 0) {
-                return false;  // Queue is empty
+                return false;     // Queue is empty
             } else {
                 // Wait for the cell to be available
                 pos = dequeue_index_.load(std::memory_order_relaxed);
             }
         }
-        item = std::move(cell->data);
-        cell->sequence.store(pos + buffer_mask_ + 1, std::memory_order_release);
-        return true;
+        LC_ASSERT(false, "Unreachable code in dequeue");
+        return false;  // Should never reach here
     }
 
 private:
 
-    typedef struct __lc_mpmc_queue_cell_t {
+    struct alignas(__LC_ALIGNAS_CACHELINE) __lc_mpmc_queue_cell_t {
         std::atomic<size_t> sequence;
-        T                   data;
-    } __lc_mpmc_queue_cell_t;
+        Tp_                 data;
+    };
 
-    __lc_cacheline_pad_t    pad0_;
-    __lc_mpmc_queue_cell_t *buffer_;
-    size_t const            buffer_mask_;
-    __lc_cacheline_pad_t    pad1_;
-    std::atomic<size_t>     enqueue_index_;
-    __lc_cacheline_pad_t    pad2_;
-    std::atomic<size_t>     dequeue_index_;
-    __lc_cacheline_pad_t    pad3_;
+    // __lc_mpmc_queue_cell_t *buffer_;
+    std::unique_ptr<__lc_mpmc_queue_cell_t[]> buffer_;
+    size_t const                              buffer_mask_;
+    alignas(__LC_ALIGNAS_CACHELINE) std::atomic<size_t> enqueue_index_;
+    alignas(__LC_ALIGNAS_CACHELINE) std::atomic<size_t> dequeue_index_;
 };
 
 enum class LCWriteTaskPriority {

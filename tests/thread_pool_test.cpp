@@ -50,7 +50,7 @@ TEST_F(LCThreadPoolTest, SubmitAndExecuteAllTasks) {
         ASSERT_TRUE(pool.wait_and_submit_task(factory));
     }
 
-    std::this_thread::sleep_for(std::chrono::seconds(10));
+    std::this_thread::sleep_for(std::chrono::seconds(5));
 
     EXPECT_EQ(state->counter.load(), kNumTasks);
     EXPECT_EQ(state->completed.size(), kNumTasks);
