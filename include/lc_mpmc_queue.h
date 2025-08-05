@@ -162,7 +162,7 @@ struct LCPriorityTraits<LCReadTaskPriority> {
     }
 };
 
-template <class T, class PriorityType>
+template <class Tp_, class PriorityType>
 class LCMPMCMultiPriorityQueue {
     static_assert(
         std::is_same<PriorityType, LCWriteTaskPriority>::value ||
@@ -174,8 +174,9 @@ public:
         size_t num_priorities =
             static_cast<size_t>(PriorityType::NUM_PRIORITIES);
         try {
-            queues_ = lc_construct_array_indexed<LCMPMCQueue<T>>(num_priorities,
-                                                                 [](size_t i) {
+            queues_ =
+                lc_construct_array_indexed<LCMPMCQueue<Tp_>>(num_priorities,
+                                                             [](size_t i) {
                 return LCPriorityTraits<PriorityType>::get_priority_queue_size(
                     static_cast<PriorityType>(i));
             });
@@ -205,22 +206,7 @@ public:
               std::enable_if_t<std::is_same_v<P, LCWriteTaskPriority> ||
                                    std::is_same_v<P, LCReadTaskPriority>,
                                int> = 0>
-    bool enqueue(const T &item, P priority) {
-        size_t index = static_cast<size_t>(priority);
-        LC_ASSERT(index < static_cast<size_t>(PriorityType::NUM_PRIORITIES),
-                  "Invalid priority index");
-        if (queues_[index].enqueue(item)) {
-            size_.fetch_add(1, std::memory_order_relaxed);
-            return true;
-        }
-        return false;  // Queue is full
-    }
-
-    template <typename P            = PriorityType,
-              std::enable_if_t<std::is_same_v<P, LCWriteTaskPriority> ||
-                                   std::is_same_v<P, LCReadTaskPriority>,
-                               int> = 0>
-    bool enqueue(T &&item, P priority) {
+    bool enqueue(Tp_ item, P priority) {
         size_t index = static_cast<size_t>(priority);
         LC_ASSERT(index < static_cast<size_t>(PriorityType::NUM_PRIORITIES),
                   "Invalid priority index");
@@ -231,11 +217,26 @@ public:
         return false;  // Queue is full
     }
 
+    // template <typename P            = PriorityType,
+    //           std::enable_if_t<std::is_same_v<P, LCWriteTaskPriority> ||
+    //                                std::is_same_v<P, LCReadTaskPriority>,
+    //                            int> = 0>
+    // bool enqueue(Tp_ &&item, P priority) {
+    //     size_t index = static_cast<size_t>(priority);
+    //     LC_ASSERT(index < static_cast<size_t>(PriorityType::NUM_PRIORITIES),
+    //               "Invalid priority index");
+    //     if (queues_[index].enqueue(std::move(item))) {
+    //         size_.fetch_add(1, std::memory_order_relaxed);
+    //         return true;
+    //     }
+    //     return false;  // Queue is full
+    // }
+
     template <typename P            = PriorityType,
               std::enable_if_t<std::is_same_v<P, LCWriteTaskPriority> ||
                                    std::is_same_v<P, LCReadTaskPriority>,
                                int> = 0>
-    bool dequeue(T &item, P priority) {
+    bool dequeue(Tp_ &item, P priority) {
         size_t index = static_cast<size_t>(priority);
         LC_ASSERT(index < static_cast<size_t>(PriorityType::NUM_PRIORITIES),
                   "Invalid priority index");
@@ -254,7 +255,7 @@ public:
     }
 
 private:
-    LCMPMCQueue<T>     *queues_;
+    LCMPMCQueue<Tp_>   *queues_;
     std::atomic<size_t> size_;
 };
 
