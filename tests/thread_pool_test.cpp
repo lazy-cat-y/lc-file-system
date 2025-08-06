@@ -24,7 +24,7 @@ protected:
 };
 
 TEST_F(LCThreadPoolTest, SubmitAndExecuteAllTasks) {
-    LCThreadPool<LCWriteTaskPriority, kThreadCount> pool("test_pool");
+    LCThreadPool<LCWriteTaskPriority> pool("test_pool", kThreadCount);
 
     for (int i = 0; i < kNumTasks; ++i) {
         auto shared_state = state;
@@ -36,7 +36,7 @@ TEST_F(LCThreadPoolTest, SubmitAndExecuteAllTasks) {
             shared_state->counter.fetch_add(1, std::memory_order_relaxed);
         });
 
-        LCTreadPoolContextMetaData<LCWriteTaskPriority> metadata {
+        LCThreadPoolContextMetaData<LCWriteTaskPriority> metadata {
             .listener_id = 0,
             .trace_id    = std::to_string(i),
             .timestamp   = std::time(nullptr),
@@ -59,7 +59,7 @@ TEST_F(LCThreadPoolTest, SubmitAndExecuteAllTasks) {
 }
 
 TEST_F(LCThreadPoolTest, CancelledTaskIsNotExecuted) {
-    LCThreadPool<LCWriteTaskPriority, kThreadCount> pool("test_cancel");
+    LCThreadPool<LCWriteTaskPriority> pool("test_cancel", kThreadCount);
 
     auto cancel_token = std::make_shared<std::atomic<bool>>(true);
     auto task = std::make_shared<LCLambdaTask<std::function<void()>>>([this]() {
@@ -67,7 +67,7 @@ TEST_F(LCThreadPoolTest, CancelledTaskIsNotExecuted) {
                                  std::memory_order_relaxed);  // should not run
     });
 
-    LCTreadPoolContextMetaData<LCWriteTaskPriority> metadata {
+    LCThreadPoolContextMetaData<LCWriteTaskPriority> metadata {
         .listener_id = 1,
         .trace_id    = "cancel_test",
         .timestamp   = std::time(nullptr),
@@ -85,13 +85,13 @@ TEST_F(LCThreadPoolTest, CancelledTaskIsNotExecuted) {
 }
 
 TEST_F(LCThreadPoolTest, ShutdownPreventsFurtherSubmission) {
-    LCThreadPool<LCWriteTaskPriority, kThreadCount> pool("test_shutdown");
+    LCThreadPool<LCWriteTaskPriority> pool("test_shutdown", kThreadCount);
 
     pool.shutdown();
 
     auto task = std::make_shared<LCLambdaTask<std::function<void()>>>([]() {});
 
-    LCTreadPoolContextMetaData<LCWriteTaskPriority> metadata {
+    LCThreadPoolContextMetaData<LCWriteTaskPriority> metadata {
         .listener_id = 2,
         .trace_id    = "shutdown_test",
         .timestamp   = std::time(nullptr),

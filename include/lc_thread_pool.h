@@ -15,6 +15,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <utility>
 
@@ -27,21 +28,20 @@ LC_NAMESPACE_BEGIN
 LC_FILESYSTEM_NAMESPACE_BEGIN
 
 template <typename PriorityType>
-struct LCTreadPoolContextMetaData {
-    uint32_t listener_id;
-    // TODO: trace id generation
+struct LCThreadPoolContextMetaData {
+    std::string  listener_id;
     std::string  trace_id;
     time_t       timestamp;
     PriorityType priority;
 };
 
 template <typename PriorityType>
-struct LCContext<LCTreadPoolContextMetaData<PriorityType>> {
+struct LCContext<LCThreadPoolContextMetaData<PriorityType>> {
     static_assert(
         std::is_same<PriorityType, LCWriteTaskPriority>::value ||
             std::is_same<PriorityType, LCReadTaskPriority>::value,
         "Invalid priority type, must be either LCWriteTaskPriority or LCReadTaskPriority");
-    LCTreadPoolContextMetaData<PriorityType> metadata;
+    LCThreadPoolContextMetaData<PriorityType> metadata;
     // std::bind(f, args...) or a lambda function
     // std::make_shared<LambdaTask<std::function<void()>>>(std::bind(&Foo::bar,
     // &foo));
@@ -51,16 +51,16 @@ struct LCContext<LCTreadPoolContextMetaData<PriorityType>> {
 
     LCContext() = default;
 
-    LCContext(const LCTreadPoolContextMetaData<PriorityType> &meta,
-              std::shared_ptr<LCTask>                         data) :
+    LCContext(const LCThreadPoolContextMetaData<PriorityType> &meta,
+              std::shared_ptr<LCTask>                          data) :
         metadata(meta),
         task(std::move(data)) {
         cancel_token = std::make_shared<std::atomic<bool>>(false);
     }
 
-    LCContext(const LCTreadPoolContextMetaData<PriorityType> &meta,
-              std::shared_ptr<LCTask>                         data,
-              std::shared_ptr<std::atomic<bool>>              cancel_token) :
+    LCContext(const LCThreadPoolContextMetaData<PriorityType> &meta,
+              std::shared_ptr<LCTask>                          data,
+              std::shared_ptr<std::atomic<bool>>               cancel_token) :
         metadata(meta),
         task(std::move(data)),
         cancel_token(std::move(cancel_token)) {}
@@ -103,7 +103,7 @@ struct LCContext<LCTreadPoolContextMetaData<PriorityType>> {
 
 template <typename PriorityType>
 class LCTreadPoolContextFactory {
-    using MetadataType = LCTreadPoolContextMetaData<PriorityType>;
+    using MetadataType = LCThreadPoolContextMetaData<PriorityType>;
     using ContextType  = LCContext<MetadataType>;
 public:
 
@@ -219,9 +219,10 @@ inline void safe_launch_function(std::function<void()> func) {
     } catch (...) {}
 }
 
-template <class PriorityType, size_t ThreadCount>
+template <class PriorityType>
 class LCThreadPool {
-    using ContextType = LCContext<LCTreadPoolContextMetaData<PriorityType>>;
+    using ContextType = LCContext<LCThreadPoolContextMetaData<PriorityType>>;
+    using TimePoint   = std::atomic<std::chrono::steady_clock::time_point>;
     static_assert(
         std::is_same<PriorityType, LCWriteTaskPriority>::value ||
             std::is_same<PriorityType, LCReadTaskPriority>::value,
@@ -235,14 +236,22 @@ public:
     LCThreadPool(LCThreadPool &&)                 = delete;
     LCThreadPool &operator=(LCThreadPool &&)      = delete;
 
-    LC_EXPLICIT LCThreadPool(const std::string &name) : name_(std::move(name)) {
-        for (size_t i = 0; i < ThreadCount; ++i) {
+    LC_EXPLICIT LCThreadPool(const std::string &name,
+                             std::size_t        thread_count) :
+        name_(std::move(name)),
+        thread_count_(thread_count) {
+        threads_        = std::make_unique<std::thread[]>(thread_count_);
+        last_heartbeat_ = std::make_unique<TimePoint[]>(thread_count_);
+        cancel_tokens_ = std::make_unique<std::shared_ptr<std::atomic<bool>>[]>(
+            thread_count_);
+
+        for (size_t i = 0; i < thread_count_; ++i) {
             cancel_tokens_[i] = std::make_shared<std::atomic<bool>>(false);
         }
         launch_worker_threads();
         stop_.store(false);
         draining_.store(false);
-        for (size_t i = 0; i < ThreadCount; ++i) {
+        for (size_t i = 0; i < thread_count_; ++i) {
             last_heartbeat_[i].store(std::chrono::steady_clock::now(),
                                      std::memory_order_relaxed);
         }
@@ -325,7 +334,7 @@ public:
 private:
 
     void launch_worker_threads() {
-        for (size_t i = 0; i < ThreadCount; ++i) {
+        for (size_t i = 0; i < thread_count_; ++i) {
             threads_[i] = std::thread([this, i]() {
                 auto token = cancel_tokens_[i];
                 safe_launch_function([this, i, token]() {
@@ -379,7 +388,7 @@ private:
             watchdog_cv_.wait_for(lock, timeout_duration, [this]() {
                 return stop_.load();
             });
-            for (size_t i = 0; i < ThreadCount; ++i) {
+            for (size_t i = 0; i < thread_count_; ++i) {
                 auto last = last_heartbeat_[i].load(std::memory_order_relaxed);
                 if (std::chrono::steady_clock::now() - last >
                     timeout_duration) {
@@ -414,9 +423,9 @@ private:
     }
 
     void join_threads() {
-        for (auto &thread : threads_) {
-            if (thread.joinable()) {
-                thread.join();
+        for (int i = 0; i < thread_count_; ++i) {
+            if (threads_[i].joinable()) {
+                threads_[i].join();
             }
         }
         if (watchdog_thread_.joinable()) {
@@ -426,19 +435,24 @@ private:
 
     LCMPMCMultiPriorityQueue<ContextType, PriorityType> task_queue_;
 
-    const std::string                    name_;
-    std::array<std::thread, ThreadCount> threads_;
-    std::atomic<bool>                    stop_;
-    std::atomic<bool>                    draining_;
-    std::condition_variable              cv_;
-    std::mutex                           mutex_;
+    const std::string              name_;
+    std::size_t                    thread_count_;
+    std::unique_ptr<std::thread[]> threads_;
+    std::atomic<bool>              stop_;
+    std::atomic<bool>              draining_;
+    std::condition_variable        cv_;
+    std::mutex                     mutex_;
 
-    std::array<std::atomic<std::chrono::steady_clock::time_point>, ThreadCount>
-                                                                last_heartbeat_;
-    std::array<std::shared_ptr<std::atomic<bool>>, ThreadCount> cancel_tokens_;
-    std::thread             watchdog_thread_;
-    std::mutex              watchdog_mutex_;
-    std::condition_variable watchdog_cv_;
+    std::unique_ptr<TimePoint[]> last_heartbeat_;
+    // std::array<std::atomic<std::chrono::steady_clock::time_point>,
+    // ThreadCount>
+    //                                                             last_heartbeat_;
+    // std::array<std::shared_ptr<std::atomic<bool>>, ThreadCount>
+    // cancel_tokens_;
+    std::unique_ptr<std::shared_ptr<std::atomic<bool>>[]> cancel_tokens_;
+    std::thread                                           watchdog_thread_;
+    std::mutex                                            watchdog_mutex_;
+    std::condition_variable                               watchdog_cv_;
 };
 
 LC_FILESYSTEM_NAMESPACE_END

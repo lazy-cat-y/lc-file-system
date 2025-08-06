@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <thread>
@@ -18,6 +19,8 @@
 #include "lc_block_device.h"
 #include "lc_configs.h"
 #include "lc_memory.h"
+#include "lc_mpmc_queue.h"
+#include "lc_thread_pool.h"
 #include "lc_utils.h"
 
 LC_NAMESPACE_BEGIN
@@ -469,6 +472,10 @@ private:
     std::thread             background_thread_;
     std::atomic<bool>       running_ {false};
     std::atomic_flag       *frame_locks_;  // Spin locks for each frame
+
+    std::shared_ptr<LCThreadPool<LCWriteTaskPriority>> write_thread_pool_;
+    std::shared_ptr<LCThreadPool<LCReadTaskPriority>>  read_thread_pool_;
+    static constexpr const char *thread_name_ = "block_buffer_pool";
 };
 
 LC_FILESYSTEM_NAMESPACE_END
