@@ -39,6 +39,10 @@ add_lcfs_test(block_device_test
     block_device_test.cpp
 )
 
+add_lcfs_test(thread_pool_test
+    thread_pool_test.cpp
+)
+
 add_lcfs_test(block_manager_test
     block_manager_test.cpp
 )
@@ -50,6 +54,7 @@ add_lcfs_test(block_manager_test
 add_lcfs_test(block_buffer_test
     block_buffer_test.cpp
 )
+
 
 # add_lcfs_test(inode_buffer_test
 #     inode_buffer_test.cpp
