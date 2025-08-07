@@ -68,7 +68,7 @@ TEST_F(LCThreadPoolTest, CancelledTaskIsNotExecuted) {
     });
 
     LCThreadPoolContextMetaData<LCWriteTaskPriority> metadata {
-        .listener_id = 1,
+        .listener_id = "test",
         .trace_id    = "cancel_test",
         .timestamp   = std::time(nullptr),
         .priority    = LCWriteTaskPriority::Normal};
@@ -92,7 +92,7 @@ TEST_F(LCThreadPoolTest, ShutdownPreventsFurtherSubmission) {
     auto task = std::make_shared<LCLambdaTask<std::function<void()>>>([]() {});
 
     LCThreadPoolContextMetaData<LCWriteTaskPriority> metadata {
-        .listener_id = 2,
+        .listener_id = "test",
         .trace_id    = "shutdown_test",
         .timestamp   = std::time(nullptr),
         .priority    = LCWriteTaskPriority::Normal};

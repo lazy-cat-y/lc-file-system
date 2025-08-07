@@ -2,6 +2,7 @@
 #ifndef LC_UTILS_H
 #define LC_UTILS_H
 
+#include <algorithm>
 #include <cstdint>
 
 #include "lc_configs.h"
@@ -26,6 +27,11 @@ inline uint64_t lc_ceil_divide_int64_t(uint64_t a, uint64_t b) {
 
 inline uint32_t *lc_uint8_array_to_uint32_array(uint8_t *array) {
     return reinterpret_cast<uint32_t *>(array);
+}
+
+inline uint8_t lc_add_usage_count(uint8_t usage_count,
+                                  uint8_t max_usage_count) {
+    return std::min<uint8_t>(usage_count + 1, max_usage_count);
 }
 
 #endif  // LC_UTILS_H

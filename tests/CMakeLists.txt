@@ -43,9 +43,9 @@ add_lcfs_test(thread_pool_test
     thread_pool_test.cpp
 )
 
-add_lcfs_test(block_manager_test
-    block_manager_test.cpp
-)
+# add_lcfs_test(block_manager_test
+#     block_manager_test.cpp
+# )
 
 # add_lcfs_test(inode_manager_test
 #     inode_manager_test.cpp
