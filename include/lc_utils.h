@@ -3,6 +3,7 @@
 #define LC_UTILS_H
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 
 #include "lc_configs.h"
@@ -32,6 +33,18 @@ inline uint32_t *lc_uint8_array_to_uint32_array(uint8_t *array) {
 inline uint8_t lc_add_usage_count(uint8_t usage_count,
                                   uint8_t max_usage_count) {
     return std::min<uint8_t>(usage_count + 1, max_usage_count);
+}
+
+inline void increment_usage_count_if_not_max(std::atomic<uint8_t> &usage_count,
+                                             uint8_t               max) {
+    uint8_t current = usage_count.load(std::memory_order_relaxed);
+    if (current >= max) {
+        return;
+    }
+    usage_count.compare_exchange_strong(current,
+                                        current + 1,
+                                        std::memory_order_acq_rel,
+                                        std::memory_order_relaxed);
 }
 
 #endif  // LC_UTILS_H

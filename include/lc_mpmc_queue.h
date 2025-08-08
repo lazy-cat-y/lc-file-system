@@ -112,16 +112,16 @@ private:
     alignas(__LC_ALIGNAS_CACHELINE) std::atomic<size_t> dequeue_index_;
 };
 
-enum class LCWriteTaskPriority {
-    Critical,        // Logs, metadata, super blocks
-    High,            // inode, time, directory entries
-    Normal,          // file data
-    Low,
-    Background,      // background fllushes, prewrites, etc.
-    NUM_PRIORITIES,  // Number of priorities defined
-};
+// enum class LCWriteTaskPriority {
+//     Critical,        // Logs, metadata, super blocks
+//     High,            // inode, time, directory entries
+//     Normal,          // file data
+//     Low,
+//     Background,      // background fllushes, prewrites, etc.
+//     NUM_PRIORITIES,  // Number of priorities defined
+// };
 
-enum class LCReadTaskPriority {
+enum class LCTaskPriority {
     Critical,        // metadata, directory traversal, opening file headers
     High,            // user requests, latency-sensitive
     Normal,          // sequential reads, page loading, etc.
@@ -134,40 +134,23 @@ template <typename PriorityType>
 struct LCPriorityTraits;
 
 template <>
-struct LCPriorityTraits<LCWriteTaskPriority> {
-    static LC_CONSTEXPR size_t
-    get_priority_queue_size(LCWriteTaskPriority pri) {
+struct LCPriorityTraits<LCTaskPriority> {
+    static LC_CONSTEXPR size_t get_priority_queue_size(LCTaskPriority pri) {
         switch (pri) {
-            case LCWriteTaskPriority::Critical   : return 64;
-            case LCWriteTaskPriority::High       : return 128;
-            case LCWriteTaskPriority::Normal     : return 256;
-            case LCWriteTaskPriority::Low        : return 512;
-            case LCWriteTaskPriority::Background : return 1024;
-            default                              : return 0;  // Invalid priority
-        }
-    }
-};
-
-template <>
-struct LCPriorityTraits<LCReadTaskPriority> {
-    static LC_CONSTEXPR size_t get_priority_queue_size(LCReadTaskPriority pri) {
-        switch (pri) {
-            case LCReadTaskPriority::Critical   : return 64;
-            case LCReadTaskPriority::High       : return 128;
-            case LCReadTaskPriority::Normal     : return 256;
-            case LCReadTaskPriority::Low        : return 512;
-            case LCReadTaskPriority::Background : return 1024;
-            default                             : return 0;  // Invalid priority
+            case LCTaskPriority::Critical   : return 64;
+            case LCTaskPriority::High       : return 128;
+            case LCTaskPriority::Normal     : return 256;
+            case LCTaskPriority::Low        : return 512;
+            case LCTaskPriority::Background : return 1024;
+            default                         : return 0;  // Invalid priority
         }
     }
 };
 
 template <class Tp_, class PriorityType>
 class LCMPMCMultiPriorityQueue {
-    static_assert(
-        std::is_same<PriorityType, LCWriteTaskPriority>::value ||
-            std::is_same<PriorityType, LCReadTaskPriority>::value,
-        "Invalid priority type, must be either LCWriteTaskPriority or LCReadTaskPriority");
+    static_assert(std::is_same<PriorityType, LCTaskPriority>::value,
+                  "Invalid priority type, must be either LCTaskPriority");
 public:
 
     LCMPMCMultiPriorityQueue() {
@@ -202,10 +185,8 @@ public:
     LCMPMCMultiPriorityQueue(LCMPMCMultiPriorityQueue &&)            = delete;
     LCMPMCMultiPriorityQueue &operator=(LCMPMCMultiPriorityQueue &&) = delete;
 
-    template <typename P            = PriorityType,
-              std::enable_if_t<std::is_same_v<P, LCWriteTaskPriority> ||
-                                   std::is_same_v<P, LCReadTaskPriority>,
-                               int> = 0>
+    template <typename P = PriorityType,
+              std::enable_if_t<std::is_same_v<P, LCTaskPriority>, int> = 0>
     bool enqueue(Tp_ item, P priority) {
         size_t index = static_cast<size_t>(priority);
         LC_ASSERT(index < static_cast<size_t>(PriorityType::NUM_PRIORITIES),
@@ -232,10 +213,8 @@ public:
     //     return false;  // Queue is full
     // }
 
-    template <typename P            = PriorityType,
-              std::enable_if_t<std::is_same_v<P, LCWriteTaskPriority> ||
-                                   std::is_same_v<P, LCReadTaskPriority>,
-                               int> = 0>
+    template <typename P = PriorityType,
+              std::enable_if_t<std::is_same_v<P, LCTaskPriority>, int> = 0>
     bool dequeue(Tp_ &item, P priority) {
         size_t index = static_cast<size_t>(priority);
         LC_ASSERT(index < static_cast<size_t>(PriorityType::NUM_PRIORITIES),

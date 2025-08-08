@@ -4,6 +4,7 @@
 
 #include <unordered_set>
 
+#include "lc_mpmc_queue.h"
 #include "lc_thread_pool.h"
 
 using namespace lc::fs;
@@ -24,7 +25,7 @@ protected:
 };
 
 TEST_F(LCThreadPoolTest, SubmitAndExecuteAllTasks) {
-    LCThreadPool<LCWriteTaskPriority> pool("test_pool", kThreadCount);
+    LCThreadPool<LCTaskPriority> pool("test_pool", kThreadCount);
 
     for (int i = 0; i < kNumTasks; ++i) {
         auto shared_state = state;
@@ -36,13 +37,13 @@ TEST_F(LCThreadPoolTest, SubmitAndExecuteAllTasks) {
             shared_state->counter.fetch_add(1, std::memory_order_relaxed);
         });
 
-        LCThreadPoolContextMetaData<LCWriteTaskPriority> metadata {
-            .listener_id = 0,
+        LCThreadPoolContextMetaData<LCTaskPriority> metadata {
+            .listener_id = "test",
             .trace_id    = std::to_string(i),
             .timestamp   = std::time(nullptr),
-            .priority    = LCWriteTaskPriority::Normal};
+            .priority    = LCTaskPriority::Normal};
 
-        LCTreadPoolContextFactory<LCWriteTaskPriority> factory(
+        LCTreadPoolContextFactory<LCTaskPriority> factory(
             metadata,
             task,
             std::make_shared<std::atomic<bool>>(false));
@@ -59,7 +60,7 @@ TEST_F(LCThreadPoolTest, SubmitAndExecuteAllTasks) {
 }
 
 TEST_F(LCThreadPoolTest, CancelledTaskIsNotExecuted) {
-    LCThreadPool<LCWriteTaskPriority> pool("test_cancel", kThreadCount);
+    LCThreadPool<LCTaskPriority> pool("test_cancel", kThreadCount);
 
     auto cancel_token = std::make_shared<std::atomic<bool>>(true);
     auto task = std::make_shared<LCLambdaTask<std::function<void()>>>([this]() {
@@ -67,15 +68,15 @@ TEST_F(LCThreadPoolTest, CancelledTaskIsNotExecuted) {
                                  std::memory_order_relaxed);  // should not run
     });
 
-    LCThreadPoolContextMetaData<LCWriteTaskPriority> metadata {
+    LCThreadPoolContextMetaData<LCTaskPriority> metadata {
         .listener_id = "test",
         .trace_id    = "cancel_test",
         .timestamp   = std::time(nullptr),
-        .priority    = LCWriteTaskPriority::Normal};
+        .priority    = LCTaskPriority::Normal};
 
-    LCTreadPoolContextFactory<LCWriteTaskPriority> factory(metadata,
-                                                           task,
-                                                           cancel_token);
+    LCTreadPoolContextFactory<LCTaskPriority> factory(metadata,
+                                                      task,
+                                                      cancel_token);
     ASSERT_TRUE(pool.wait_and_submit_task(factory));
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -85,19 +86,19 @@ TEST_F(LCThreadPoolTest, CancelledTaskIsNotExecuted) {
 }
 
 TEST_F(LCThreadPoolTest, ShutdownPreventsFurtherSubmission) {
-    LCThreadPool<LCWriteTaskPriority> pool("test_shutdown", kThreadCount);
+    LCThreadPool<LCTaskPriority> pool("test_shutdown", kThreadCount);
 
     pool.shutdown();
 
     auto task = std::make_shared<LCLambdaTask<std::function<void()>>>([]() {});
 
-    LCThreadPoolContextMetaData<LCWriteTaskPriority> metadata {
+    LCThreadPoolContextMetaData<LCTaskPriority> metadata {
         .listener_id = "test",
         .trace_id    = "shutdown_test",
         .timestamp   = std::time(nullptr),
-        .priority    = LCWriteTaskPriority::Normal};
+        .priority    = LCTaskPriority::Normal};
 
-    LCTreadPoolContextFactory<LCWriteTaskPriority> factory(
+    LCTreadPoolContextFactory<LCTaskPriority> factory(
         metadata,
         task,
         std::make_shared<std::atomic<bool>>(false));

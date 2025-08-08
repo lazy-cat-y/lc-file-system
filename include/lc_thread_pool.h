@@ -37,10 +37,8 @@ struct LCThreadPoolContextMetaData {
 
 template <typename PriorityType>
 struct LCContext<LCThreadPoolContextMetaData<PriorityType>> {
-    static_assert(
-        std::is_same<PriorityType, LCWriteTaskPriority>::value ||
-            std::is_same<PriorityType, LCReadTaskPriority>::value,
-        "Invalid priority type, must be either LCWriteTaskPriority or LCReadTaskPriority");
+    static_assert(std::is_same<PriorityType, LCTaskPriority>::value,
+                  "Invalid priority type, must be LCTaskPriority");
     LCThreadPoolContextMetaData<PriorityType> metadata;
     // std::bind(f, args...) or a lambda function
     // std::make_shared<LambdaTask<std::function<void()>>>(std::bind(&Foo::bar,
@@ -136,18 +134,9 @@ template <typename PriorityWeightType>
 struct LCPriorityWeights;
 
 template <>
-struct LCPriorityWeights<LCWriteTaskPriority> {
+struct LCPriorityWeights<LCTaskPriority> {
     static constexpr std::array<
-        uint32_t, static_cast<size_t>(LCWriteTaskPriority::NUM_PRIORITIES)>
-    get_weights() {
-        return {10, 8, 5, 3, 1};
-    }
-};
-
-template <>
-struct LCPriorityWeights<LCReadTaskPriority> {
-    static constexpr std::array<
-        uint32_t, static_cast<size_t>(LCReadTaskPriority::NUM_PRIORITIES)>
+        uint32_t, static_cast<size_t>(LCTaskPriority::NUM_PRIORITIES)>
     get_weights() {
         return {10, 8, 5, 3, 1};
     }
@@ -155,10 +144,8 @@ struct LCPriorityWeights<LCReadTaskPriority> {
 
 template <typename T, typename PriorityType>
 class LCWeightedRoundRobinScheduler {
-    static_assert(
-        std::is_same<PriorityType, LCWriteTaskPriority>::value ||
-            std::is_same<PriorityType, LCReadTaskPriority>::value,
-        "Invalid priority type, must be either LCWriteTaskPriority or LCReadTaskPriority");
+    static_assert(std::is_same<PriorityType, LCTaskPriority>::value,
+                  "Invalid priority type, must be LCTaskPriority");
 public:
 
     LCWeightedRoundRobinScheduler() {
@@ -223,10 +210,8 @@ template <class PriorityType>
 class LCThreadPool {
     using ContextType = LCContext<LCThreadPoolContextMetaData<PriorityType>>;
     using TimePoint   = std::atomic<std::chrono::steady_clock::time_point>;
-    static_assert(
-        std::is_same<PriorityType, LCWriteTaskPriority>::value ||
-            std::is_same<PriorityType, LCReadTaskPriority>::value,
-        "Invalid priority type, must be either LCWriteTaskPriority or LCReadTaskPriority");
+    static_assert(std::is_same<PriorityType, LCTaskPriority>::value,
+                  "Invalid priority type, must be LCTaskPriority");
 public:
 
     LCThreadPool() = delete;
@@ -318,6 +303,27 @@ public:
         }
     }
 
+    void wait_for_all_tasks() {
+        while (true) {
+            if (task_queue_.is_empty()) {
+                bool all_idle = true;
+                auto now      = std::chrono::steady_clock::now();
+                for (size_t i = 0; i < thread_count_; ++i) {
+                    auto last =
+                        last_heartbeat_[i].load(std::memory_order_relaxed);
+                    if (now - last < std::chrono::milliseconds(5)) {
+                        all_idle = false;
+                        break;
+                    }
+                }
+                if (all_idle) {
+                    break;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+
     bool is_stopped() const {
         return stop_.load(std::memory_order_acquire);
     }
@@ -368,6 +374,9 @@ private:
                 last_heartbeat_[thread_index].store(
                     std::chrono::steady_clock::now(),
                     std::memory_order_relaxed);
+                if (!context.cancel_token) {
+                    continue;
+                }
                 if (!context.is_cancelled()) {
                     context();
                 }
@@ -382,7 +391,7 @@ private:
 
     void watchdog_loop() {
         const auto timeout_duration =
-            std::chrono::seconds(10);  // Adjust as needed
+            std::chrono::seconds(100);  // Adjust as needed
         while (!stop_.load()) {
             std::unique_lock<std::mutex> lock(watchdog_mutex_);
             watchdog_cv_.wait_for(lock, timeout_duration, [this]() {
