@@ -178,10 +178,15 @@ public:
     LCBlockBufferPool &operator=(LCBlockBufferPool &&)      = delete;
 
     LC_EXPLICIT LCBlockBufferPool(
-        LCBlockDevice *block_device, uint32_t pool_size,
-        uint32_t                                      frame_interval_ms,
+        std::shared_ptr<LCBlockDevice> block_device, size_t pool_size,
         std::shared_ptr<LCThreadPool<LCTaskPriority>> write_thread_pool,
-        std::shared_ptr<LCThreadPool<LCTaskPriority>> read_thread_pool);
+        std::shared_ptr<LCThreadPool<LCTaskPriority>> read_thread_pool) :
+        block_device_(std::move(block_device)),
+        frame_pool_size_(pool_size),
+        write_thread_pool_(std::move(write_thread_pool)),
+        read_thread_pool_(std::move(read_thread_pool)) {
+        init_resources();
+    }
 
     //     block_device_(block_device),
     //     pool_size_(pool_size),
@@ -402,105 +407,109 @@ private:
         std::unique_ptr<WriteLock>         write_lock_;
     };
 
-    uint32_t find_frame(uint32_t block_id, LCTaskPriority priority) {
-        // while (true) {
-        //     {
-        //         std::shared_lock<std::shared_mutex> shared_lock(
-        //             frame_map_mutex_);
+    size_t acquire_frame(uint32_t block_id, LCTaskPriority priority,
+                         std::shared_ptr<std::atomic<bool>> cancel_token) {
+        while (true) {
+            {
+                std::shared_lock<std::shared_mutex> shared_lock(
+                    frame_map_lock_);
 
-        //         auto it = frame_map_.find(block_id);
-        //         if (it != frame_map_.end()) {
-        //             return it->second;  // Return existing frame index
-        //         }
-        //     }
+                auto it = frame_map_.find(block_id);
+                if (it != frame_map_.end()) {
+                    return it->second;  // Return existing frame index
+                }
+            }
 
-        //     std::unique_lock<std::shared_mutex> write_lock(frame_map_mutex_);
+            // Not found, write map
+            std::unique_lock<std::shared_mutex> write_lock(frame_map_lock_);
+            // Double-check locking to avoid ABA problem, when we release the
+            // read lock, another thread may have inserted the block_id.
+            auto it = frame_map_.find(block_id);
+            if (it != frame_map_.end()) {
+                return it->second;  // Return existing frame index
+            }
 
-        //     // Double-check locking to avoid ABA porblem, when we release the
-        //     // the read lock, another thread may have inserted the block_id.
-        //     auto it = frame_map_.find(block_id);
-        //     if (it != frame_map_.end()) {
-        //         return it->second;  // Return existing frame index
-        //     }
+            // check whether existing invalid frame can be reused
+            for (size_t i = 0; i < frame_pool_size_; ++i) {
+                Frame &frame = frame_pool_[i];
+                // Since the frame is invalid, it is unnecessary to check the
+                // other values.
+                FrameStatus expected_status = FrameStatus::Invalid;
+                if (frame.status.compare_exchange_strong(
+                        expected_status,
+                        FrameStatus::ReadInProgress,
+                        std::memory_order_acq_rel,
+                        std::memory_order_acquire)) {
+                    frame.block_id.store(block_id, std::memory_order_relaxed);
+                    frame.ref_count.store(0, std::memory_order_relaxed);
+                    frame.usage_count.store(1, std::memory_order_relaxed);
+                    frame.version.fetch_add(1, std::memory_order_relaxed);
+                    frame_map_[block_id] = i;
+                    write_lock.unlock();
 
-        //     uint32_t    frame_index = evict_frame();
-        //     auto       &frame       = frames_[frame_index];
-        //     FrameStatus expected    = FrameStatus::Invalid;
-        //     if (!frame.status.compare_exchange_strong(
-        //             expected,
-        //             FrameStatus::ReadInProgress,
-        //             std::memory_order_acq_rel)) {
-        //         continue;  // Retry if the frame is not in the expected state
-        //     }
+                    submit_read_task(block_id, i, priority, cancel_token);
+                    return i;
+                }
+            }
 
-        //     std::shared_ptr<std::atomic<bool>> cancel_token =
-        //         std::make_shared<std::atomic<bool>>(false);
-        //     submit_read_task(block_id, frame_index, priority, cancel_token);
+            // use clock algorithm to find a reusable frame
+            size_t frame_index = pick_victim_and_mark_evicting_unlocked();
+            LC_ASSERT(frame_index >= 0 && frame_index < frame_pool_size_,
+                      "Invalid frame index found during eviction");
 
-        //     frame.block_id.store(block_id, std::memory_order_relaxed);
-        //     frame.ref_count.store(0, std::memory_order_relaxed);
-        //     frame.usage_count.store(1, std::memory_order_relaxed);
-        //     frame_map_[block_id] = frame_index;  // Insert into frame_map_
-        //     return frame_index;                  // Return the new frame
-        //     index
-        // }
-        // LC_ASSERT(false, "No reusable frame found, this should not happen");
-        // return -1;                               // Should never reach here
+            Frame &frame = frame_pool_[frame_index];
+            frame.block_id.store(block_id, std::memory_order_relaxed);
+            frame.ref_count.store(0, std::memory_order_relaxed);
+            frame.usage_count.store(1, std::memory_order_relaxed);
+            frame.version.fetch_add(1, std::memory_order_relaxed);
+            frame.status.store(FrameStatus::ReadInProgress,
+                               std::memory_order_release);
+            frame_map_[block_id] = frame_index;  // Insert into frame_map_
+
+            write_lock.unlock();
+            submit_read_task(block_id, frame_index, priority, cancel_token);
+            return frame_index;  // Return the new frame index
+        }
+        LC_ASSERT(false, "No reusable frame found, this should not happen");
+        return 0;
     }
 
     // Clock sweep to find a reusable frame
-    uint32_t evict_frame() {
-        // while (true) {
-        //     uint32_t frame_index =
-        //         clock_hand_.fetch_add(1, std::memory_order_relaxed) %
-        //         pool_size_;
-        //     auto &frame = frames_[frame_index];
+    size_t pick_victim_and_mark_evicting_unlocked() {
+        while (true) {
+            size_t frame_index =
+                clock_hand_.fetch_add(1, std::memory_order_relaxed) %
+                frame_pool_size_;
+            Frame &frame = frame_pool_[frame_index];
 
-        //     FrameStatus status =
-        //     frame.status.load(std::memory_order_acquire); uint8_t ref_count =
-        //     frame.ref_count.load(std::memory_order_acquire); uint8_t
-        //     usage_count =
-        //         frame.usage_count.load(std::memory_order_acquire);
+            if (frame.ref_count.load(std::memory_order_acquire) > 0) {
+                continue;  // Skip if the frame is still in use
+            }
 
-        //     if (ref_count > 0) {
-        //         continue;
-        //     }
+            uint8_t usage_count =
+                frame.usage_count.load(std::memory_order_acquire);
+            if (usage_count > 0) {
+                frame.usage_count.fetch_sub(1, std::memory_order_relaxed);
+                continue;  // Skip if the frame is still in use
+            }
 
-        //     if (usage_count > 0) {
-        //         frame.usage_count.fetch_sub(1, std::memory_order_relaxed);
-        //         continue;
-        //     }
+            FrameStatus expected_status =
+                FrameStatus::ValidClean;  // Check if the frame is valid
+            if (!frame.status.compare_exchange_strong(
+                    expected_status,
+                    FrameStatus::Evicting,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+                continue;  // Retry if the frame is not in the expected state
+            }
 
-        //     if (frame.status.load(std::memory_order_release) ==
-        //         LCBlockBufferPoolFrameStatus::Invalid) {
-        //         return frame_index;  // Found a reusable frame
-        //     }
-
-        //     FrameStatus expected_status = FrameStatus::ValidClean;
-        //     if (!frame.status.compare_exchange_strong(
-        //             expected_status,
-        //             FrameStatus::Evicting,
-        //             std::memory_order_acq_rel)) {
-        //         continue;
-        //     }
-
-        //     uint64_t old_version =
-        //         frame.version.load(std::memory_order_acquire);
-        //     uint32_t old_block_id =
-        //         frame.block_id.load(std::memory_order_relaxed);
-        //     frame_map_.erase(old_block_id);
-        //     frame.status.store(FrameStatus::Invalid,
-        //     std::memory_order_release);
-        //     frame.block_id.store(LC_BLOCK_ILLEGAL_ID,
-        //                          std::memory_order_relaxed);
-        //     frame.version.fetch_add(1, std::memory_order_relaxed);
-        //     frame.usage_count.store(0, std::memory_order_relaxed);
-        //     return frame_index;
-        // }
-
-        // // Should never reach here
-        // LC_ASSERT(false, "No reusable frame found, this should not happen");
-        // return -1;
+            uint32_t old_block_id =
+                frame.block_id.load(std::memory_order_relaxed);
+            frame_map_.erase(old_block_id);  // Remove from frame_map_
+            return frame_index;
+        }
+        LC_ASSERT(false, "No reusable frame found, this should not happen");
+        return 0;
     }
 
     // Background flush logic
@@ -605,49 +614,46 @@ private:
     }
 
     void init_resources() {
-        // frames_ = std::make_unique<Frame[]>(pool_size_);
-        // frame_locks_ =
-        //     std::make_unique<std::shared_ptr<std::shared_mutex>[]>(pool_size_);
-        // wait_strategy_ = std::make_unique<LCConditionVariableWaitStrategy>();
-        // for (uint32_t i = 0; i < pool_size_; ++i) {
-        //     frame_locks_[i] = std::make_shared<std::shared_mutex>();
-        //     frames_[i].status.store(LCBlockBufferPoolFrameStatus::Invalid,
-        //                             std::memory_order_relaxed);
-        //     frames_[i].ref_count   = 0;
-        //     frames_[i].usage_count = 0;
-        //     frames_[i].block_id    = LC_BLOCK_ILLEGAL_ID;
-        //     block_clear(&frames_[i].block);
-        // }
+        frame_pool_  = std::make_unique<Frame[]>(frame_pool_size_);
+        frame_locks_ = std::make_unique<std::shared_ptr<std::shared_mutex>[]>(
+            frame_pool_size_);
+        wait_strategy_ = std::make_unique<LCConditionVariableWaitStrategy>();
+        for (size_t i = 0; i < frame_pool_size_; ++i) {
+            frame_locks_[i] = std::make_shared<std::shared_mutex>();
+            frame_pool_[i].status.store(LCBlockBufferPoolFrameStatus::Invalid,
+                                        std::memory_order_relaxed);
+            frame_pool_[i].ref_count.store(0, std::memory_order_relaxed);
+            frame_pool_[i].version.store(0, std::memory_order_relaxed);
+            frame_pool_[i].usage_count.store(0, std::memory_order_relaxed);
+            frame_pool_[i].block_id.store(LC_BLOCK_ILLEGAL_ID,
+                                          std::memory_order_relaxed);
+            block_clear(&frame_pool_[i].block);
+        }
     }
 
-    void free_resources() {
-        // frames_      = nullptr;
-        // frame_locks_ = nullptr;
-    }
+    void free_resources() {}
 
-    // LCBlockManager         *block_manager_;
-    // LCBlockDevice           *block_device_;
-    // std::unique_ptr<Frame[]> frames_;
-    // uint32_t                 pool_size_;
-    // uint32_t                 frame_interval_ms_;
-    // std::unordered_map<uint32_t, uint32_t>
-    //     frame_map_;   // Maps block_id to frame index
+    size_t                                                frame_pool_size_;
+    std::unique_ptr<Frame[]>                              frame_pool_;
+    std::unique_ptr<std::shared_ptr<std::shared_mutex>[]> frame_locks_;
+    std::unordered_map<uint32_t, uint32_t>
+                      frame_map_;  // Maps block_id to frame index
+    std::shared_mutex frame_map_lock_;
 
-    // std::atomic<uint32_t>
-    //     clock_hand_;  // For clock algorithm, store the index of the next
-    //                   // frame to check, this should be atomic
+    std::atomic<size_t>
+        clock_hand_;  // For clock algorithm, store the index of the next
 
-    // // Concurrency
-    // std::shared_mutex frame_map_mutex_;  // Mutex for frame_map_
-    // std::thread       background_thread_;
-    // std::atomic<bool> running_ {false};
-    // // std::atomic_flag *frame_locks_;      // Spin locks for each frame
-    // std::unique_ptr<std::shared_ptr<std::shared_mutex>[]> frame_locks_;
+    std::shared_ptr<LCBlockDevice>                block_device_;
+    std::unique_ptr<LCWaitStrategyBase>           wait_strategy_;
+    std::shared_ptr<LCThreadPool<LCTaskPriority>> write_thread_pool_;
+    std::shared_ptr<LCThreadPool<LCTaskPriority>> read_thread_pool_;
+    static constexpr const char *thread_name_ = "block_buffer_pool";
 
-    // std::unique_ptr<LCWaitStrategyBase>           wait_strategy_;
-    // std::shared_ptr<LCThreadPool<LCTaskPriority>> write_thread_pool_;
-    // std::shared_ptr<LCThreadPool<LCTaskPriority>> read_thread_pool_;
-    // static constexpr const char *thread_name_ = "block_buffer_pool";
+    // Buffer pool thread
+    std::thread                                background_thread_;
+    std::atomic<bool>                          running_;
+    static constexpr std::chrono::milliseconds frame_interval_ms_ =
+        std::chrono::milliseconds(1000);
 };
 
 LC_FILESYSTEM_NAMESPACE_END
