@@ -9,6 +9,7 @@ void lc::fs::__lc_generate_trace_type_name(LCTraceTypeID      type_id,
                                            std::stringstream &trace_name) {
     switch (type_id) {
         case LCTraceTypeID::WriteTask : trace_name << "write_task"; break;
+        case LCTraceTypeID::FlushTask : trace_name << "flush_task"; break;
         case LCTraceTypeID::BackgroundFlushTask :
             trace_name << "background_flush_task";
             break;

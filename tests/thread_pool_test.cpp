@@ -43,10 +43,7 @@ TEST_F(LCThreadPoolTest, SubmitAndExecuteAllTasks) {
             .timestamp   = std::time(nullptr),
             .priority    = LCTaskPriority::Normal};
 
-        LCTreadPoolContextFactory<LCTaskPriority> factory(
-            metadata,
-            task,
-            std::make_shared<std::atomic<bool>>(false));
+        LCTreadPoolContextFactory<LCTaskPriority> factory(metadata, task);
 
         ASSERT_TRUE(pool.wait_and_submit_task(factory));
     }
@@ -55,32 +52,6 @@ TEST_F(LCThreadPoolTest, SubmitAndExecuteAllTasks) {
 
     EXPECT_EQ(state->counter.load(), kNumTasks);
     EXPECT_EQ(state->completed.size(), kNumTasks);
-
-    pool.shutdown();
-}
-
-TEST_F(LCThreadPoolTest, CancelledTaskIsNotExecuted) {
-    LCThreadPool<LCTaskPriority> pool("test_cancel", kThreadCount);
-
-    auto cancel_token = std::make_shared<std::atomic<bool>>(true);
-    auto task = std::make_shared<LCLambdaTask<std::function<void()>>>([this]() {
-        state->counter.fetch_add(100,
-                                 std::memory_order_relaxed);  // should not run
-    });
-
-    LCThreadPoolContextMetaData<LCTaskPriority> metadata {
-        .listener_id = "test",
-        .trace_id    = "cancel_test",
-        .timestamp   = std::time(nullptr),
-        .priority    = LCTaskPriority::Normal};
-
-    LCTreadPoolContextFactory<LCTaskPriority> factory(metadata,
-                                                      task,
-                                                      cancel_token);
-    ASSERT_TRUE(pool.wait_and_submit_task(factory));
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    EXPECT_EQ(state->counter.load(), 0);
 
     pool.shutdown();
 }
@@ -98,10 +69,7 @@ TEST_F(LCThreadPoolTest, ShutdownPreventsFurtherSubmission) {
         .timestamp   = std::time(nullptr),
         .priority    = LCTaskPriority::Normal};
 
-    LCTreadPoolContextFactory<LCTaskPriority> factory(
-        metadata,
-        task,
-        std::make_shared<std::atomic<bool>>(false));
+    LCTreadPoolContextFactory<LCTaskPriority> factory(metadata, task);
 
     ASSERT_FALSE(pool.wait_and_submit_task(factory));
 }

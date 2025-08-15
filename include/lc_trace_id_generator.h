@@ -13,6 +13,7 @@ LC_FILESYSTEM_NAMESPACE_BEGIN
 
 enum class LCTraceTypeID {
     WriteTask,
+    FlushTask,
     BackgroundFlushTask,
     ReadTask,
     BlockTask,

@@ -44,58 +44,33 @@ struct LCContext<LCThreadPoolContextMetaData<PriorityType>> {
     // std::make_shared<LambdaTask<std::function<void()>>>(std::bind(&Foo::bar,
     // &foo));
     // std::make_shared<LambdaTask<decltype(real_lambda)>>(std::move(real_lambda));
-    std::shared_ptr<LCTask>            task;
-    std::shared_ptr<std::atomic<bool>> cancel_token;
+    std::shared_ptr<LCTask> task;
 
     LCContext() = default;
 
     LCContext(const LCThreadPoolContextMetaData<PriorityType> &meta,
               std::shared_ptr<LCTask>                          data) :
         metadata(meta),
-        task(std::move(data)) {
-        cancel_token = std::make_shared<std::atomic<bool>>(false);
-    }
-
-    LCContext(const LCThreadPoolContextMetaData<PriorityType> &meta,
-              std::shared_ptr<LCTask>                          data,
-              std::shared_ptr<std::atomic<bool>>               cancel_token) :
-        metadata(meta),
-        task(std::move(data)),
-        cancel_token(std::move(cancel_token)) {}
+        task(std::move(data)) {}
 
     LCContext(const LCContext &)            = delete;
     LCContext &operator=(const LCContext &) = delete;
 
     LCContext(LCContext &&other) {
-        metadata     = std::move(other.metadata);
-        task         = std::move(other.task);
-        cancel_token = std::move(other.cancel_token);
+        metadata = std::move(other.metadata);
+        task     = std::move(other.task);
     }
 
     LCContext &operator=(LCContext &&other) {
         if (this != &other) {
-            metadata     = std::move(other.metadata);
-            task         = std::move(other.task);
-            cancel_token = std::move(other.cancel_token);
+            metadata = std::move(other.metadata);
+            task     = std::move(other.task);
         }
         return *this;
     }
 
-    bool is_cancelled() const {
-        LC_ASSERT(cancel_token != nullptr, "cancel_token is nullptr!");
-        return cancel_token && cancel_token->load();
-    }
-
-    void cancel() {
-        if (cancel_token) {
-            cancel_token->store(true);
-        }
-    }
-
     void operator()() const {
-        if (!is_cancelled() && task) {
-            task->run();
-        }
+        task->run();
     }
 };
 
@@ -113,21 +88,18 @@ public:
     LCTreadPoolContextFactory(LCTreadPoolContextFactory &&)            = delete;
     LCTreadPoolContextFactory &operator=(LCTreadPoolContextFactory &&) = delete;
 
-    LCTreadPoolContextFactory(const MetadataType                &metadata,
-                              std::shared_ptr<LCTask>            task,
-                              std::shared_ptr<std::atomic<bool>> cancel_token) :
+    LCTreadPoolContextFactory(const MetadataType     &metadata,
+                              std::shared_ptr<LCTask> task) :
         metadata_(metadata),
-        task_(std::move(task)),
-        cancel_token_(std::move(cancel_token)) {}
+        task_(std::move(task)) {}
 
     ContextType make() {
-        return ContextType(metadata_, task_, cancel_token_);
+        return ContextType(metadata_, task_);
     }
 
 private:
-    MetadataType                       metadata_;
-    std::shared_ptr<LCTask>            task_;
-    std::shared_ptr<std::atomic<bool>> cancel_token_;
+    MetadataType            metadata_;
+    std::shared_ptr<LCTask> task_;
 };
 
 template <typename PriorityWeightType>
@@ -374,12 +346,7 @@ private:
                 last_heartbeat_[thread_index].store(
                     std::chrono::steady_clock::now(),
                     std::memory_order_relaxed);
-                if (!context.cancel_token) {
-                    continue;
-                }
-                if (!context.is_cancelled()) {
-                    context();
-                }
+                context();
                 continue;
             }
 
