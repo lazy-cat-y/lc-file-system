@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <memory>
 
 #include "lc_configs.h"
 
@@ -45,6 +46,10 @@ inline void increment_usage_count_if_not_max(std::atomic<uint8_t> &usage_count,
                                         current + 1,
                                         std::memory_order_acq_rel,
                                         std::memory_order_relaxed);
+}
+
+inline bool task_is_cancelled(std::shared_ptr<std::atomic<bool>> cancel_token) {
+    return cancel_token && cancel_token->load(std::memory_order_acquire);
 }
 
 #endif  // LC_UTILS_H

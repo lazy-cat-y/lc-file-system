@@ -81,10 +81,10 @@ struct LCBlockFrameGuard {
     uint64_t                           version;
     FrameGuardLockType                 lock_type;
 
-    LCBlockFrameGuard(Frame *frame, uint64_t version,
+    LCBlockFrameGuard(std::shared_ptr<Frame> frame, uint64_t version,
                       std::shared_ptr<std::shared_mutex> lock,
                       FrameGuardLockType                 lock_type) :
-        frame(std::shared_ptr<Frame>(frame, [](Frame *) {})),
+        frame(std::move(frame)),
         version(version),
         lock(std::move(lock)),
         read_lock(*lock, std::defer_lock),
@@ -164,7 +164,8 @@ class LCBlockBufferPool {
     using FrameLockType = LCBlockFrameGuardLockType;
     using ThreadPoolContextMetaData =
         LCThreadPoolContextMetaData<LCTaskPriority>;
-    using ContextFactory = LCTreadPoolContextFactory<LCTaskPriority>;
+    using ContextFactory  = LCTreadPoolContextFactory<LCTaskPriority>;
+    using CancelTokenType = std::shared_ptr<std::atomic<bool>>;
 
     enum class FrameIndexSlotStatus {
         Processing,
@@ -214,7 +215,8 @@ public:
     LCBlockBufferPool() = delete;
 
     ~LCBlockBufferPool() {
-        // LC_ASSERT(!running_.load(), "Cannot destruct while running");
+        LC_ASSERT(!running_.load(std::memory_order_acquire),
+                  "Cannot destruct while running");
         free_resources();
     }
 
@@ -244,187 +246,249 @@ public:
     // }
 
     void start() {
-        // bool expected = false;
-        // if (running_.compare_exchange_strong(expected, true)) {
-        //     background_thread_ =
-        //         std::thread(&LCBlockBufferPool::background_flush_loop, this);
-        // }
+        bool expected = false;
+        if (running_.compare_exchange_strong(expected, true)) {
+            background_thread_ =
+                std::thread(&LCBlockBufferPool::background_flush_loop, this);
+        }
     }
 
     void stop() {
-        // bool expected = true;
-        // if (running_.compare_exchange_strong(expected, false)) {
-        //     wait_strategy_->notify_all();
-        //     if (background_thread_.joinable()) {
-        //         background_thread_.join();
-        //     }
-        //     flush_all(LCTaskPriority::High);
-        // }
+        bool expected = true;
+        if (running_.compare_exchange_strong(expected, false)) {
+            wait_strategy_->notify_all();
+            if (background_thread_.joinable()) {
+                background_thread_.join();
+            }
+            flush_all(LCTaskPriority::High, nullptr);
+        }
     }
 
     // This function copies the contents, ref_count is not incremented
-    void read_block(uint32_t block_id, LCBlock &block,
-                    LCTaskPriority priority) {
-        // while (true) {
-        //     uint32_t frame_index = find_frame(block_id, priority);
-        //     {
-        //         FrameReadWriteLock lock(frame_locks_[frame_index],
-        //                                 FrameLockType::Read);
+    void read_block(uint32_t block_id, LCBlock &block, LCTaskPriority priority,
+                    CancelTokenType cancel_token) {
+        while (true) {
+            if (task_is_cancelled(cancel_token)) {
+                return;  // Exit if the task is cancelled
+            }
+            size_t frame_index =
+                acquire_frame(block_id, priority, cancel_token);
+            if (frame_index == LC_BLOCK_ILLEGAL_ID) {
+                continue;
+            }
+            {
+                FrameReadWriteLock lock(frame_locks_[frame_index],
+                                        FrameLockType::Read);
 
-        //         Frame &frame  = frames_[frame_index];
-        //         auto   status = frame.status.load(std::memory_order_relaxed);
-        //         if ((status != FrameStatus::ValidClean &&
-        //              status != FrameStatus::Dirty) ||
-        //             frame.block_id.load(std::memory_order_relaxed) !=
-        //                 block_id) {
-        //             continue;  // Retry if the frame is not valid or does not
-        //                        // match
-        //         }
-        //         __lc_add_lc_block_usage_count(frame.usage_count);
-        //         lc_memcpy(&block, &frame.block, DEFAULT_BLOCK_SIZE);
-        //         return;
-        //     }
-        // }
-        // LC_ASSERT(false, "Block ID not found, this should not happen");
+                Frame      &frame = *frame_pool_[frame_index];
+                FrameStatus status =
+                    frame.status.load(std::memory_order_relaxed);
+                if ((status != FrameStatus::ValidClean &&
+                     status != FrameStatus::Dirty) ||
+                    frame.block_id.load(std::memory_order_relaxed) !=
+                        block_id) {
+                    continue;
+                }
+                __lc_add_lc_block_usage_count(frame.usage_count);
+                lc_memcpy(&block, &frame.block, DEFAULT_BLOCK_SIZE);
+                return;
+            }
+        }
+        LC_ASSERT(false, "Block ID not found, this should not happen");
     }
 
-    void read_block(uint32_t block_id, LCTaskPriority priority, void *data,
-                    uint32_t size, uint32_t offset = 0) {
-        // LC_ASSERT(size > 0, "Size must be positive");
-        // LC_ASSERT(offset >= 0, "Offset must be non-negative");
-        // LC_ASSERT(size <= DEFAULT_BLOCK_SIZE - offset,
-        //           "Size exceeds block size minus offset");
+    void read_block(uint32_t block_id, LCTaskPriority priority,
+                    CancelTokenType cancel_token, void *data, uint32_t size,
+                    uint32_t offset = 0) {
+        LC_ASSERT(size > 0, "Size must be positive");
+        LC_ASSERT(offset >= 0, "Offset must be non-negative");
+        LC_ASSERT(size <= DEFAULT_BLOCK_SIZE - offset,
+                  "Size exceeds block size minus offset");
 
-        // while (true) {
-        //     LC_ASSERT(data != nullptr, "Data pointer cannot be null");
-        //     uint frame_index = find_frame(block_id, priority);
-        //     {
-        //         FrameReadWriteLock lock(frame_locks_[frame_index],
-        //                                 FrameLockType::Read);
-        //         Frame             &frame = frames_[frame_index];
-        //         auto status = frame.status.load(std::memory_order_relaxed);
-        //         if ((status != FrameStatus::ValidClean &&
-        //              status != FrameStatus::Dirty) ||
-        //             frame.block_id.load(std::memory_order_relaxed) !=
-        //                 block_id) {
-        //             continue;  // Retry if the frame is not valid or does not
-        //                        // match
-        //         }
-        //         __lc_add_lc_block_usage_count(frame.usage_count);
-        //         lc_memcpy(static_cast<uint8_t *>(data),
-        //                   block_as(&frame.block) + offset,
-        //                   size);
-        //         return;
-        //     }
-        // }
+        while (true) {
+            LC_ASSERT(data != nullptr, "Data pointer cannot be null");
+            if (task_is_cancelled(cancel_token)) {
+                return;  // Exit if the task is cancelled
+            }
+            size_t frame_index =
+                acquire_frame(block_id, priority, cancel_token);
+            if (frame_index == LC_BLOCK_ILLEGAL_ID) {
+                continue;  // Retry if the frame index is illegal
+            }
+            {
+                FrameReadWriteLock lock(frame_locks_[frame_index],
+                                        FrameLockType::Read);
+                Frame             &frame = *frame_pool_[frame_index];
+                auto status = frame.status.load(std::memory_order_relaxed);
+                if ((status != FrameStatus::ValidClean &&
+                     status != FrameStatus::Dirty) ||
+                    frame.block_id.load(std::memory_order_relaxed) !=
+                        block_id) {
+                    continue;  // Retry if the frame is not valid or does not
+                               // match
+                }
+                __lc_add_lc_block_usage_count(frame.usage_count);
+                lc_memcpy(static_cast<uint8_t *>(data),
+                          block_as(&frame.block) + offset,
+                          size);
+                return;
+            }
+        }
+        LC_ASSERT(false, "Block ID not found, this should not happen");
     }
 
     void write_block(uint32_t block_id, LCTaskPriority priority,
-                     const void *data, uint32_t size, uint32_t offset = 0) {
-        // LC_ASSERT(size <= DEFAULT_BLOCK_SIZE - offset,
-        //           "Size exceeds block size minus offset");
-        // while (true) {
-        //     LC_ASSERT(data != nullptr, "Data pointer cannot be null");
-        //     uint32_t frame_index = find_frame(block_id, priority);
-        //     {
-        //         FrameReadWriteLock lock(frame_locks_[frame_index],
-        //                                 FrameLockType::Write);
-        //         Frame             &frame = frames_[frame_index];
+                     CancelTokenType cancel_token, const void *data,
+                     uint32_t size, uint32_t offset = 0) {
+        LC_ASSERT(size <= DEFAULT_BLOCK_SIZE - offset,
+                  "Size exceeds block size minus offset");
+        while (true) {
+            LC_ASSERT(data != nullptr, "Data pointer cannot be null");
+            if (task_is_cancelled(cancel_token)) {
+                return;  // Exit if the task is cancelled
+            }
+            size_t frame_index =
+                acquire_frame(block_id, priority, cancel_token);
+            {
+                FrameReadWriteLock lock(frame_locks_[frame_index],
+                                        FrameLockType::Write);
+                Frame             &frame = *frame_pool_[frame_index];
 
-        //         if (frame.status.load(std::memory_order_relaxed) ==
-        //                 LCBlockBufferPoolFrameStatus::Invalid ||
-        //             frame.block_id.load(std::memory_order_relaxed) !=
-        //                 block_id) {
-        //             continue;  // Retry if the frame is not valid or does not
-        //                        // match
-        //         }
+                FrameStatus status =
+                    frame.status.load(std::memory_order_relaxed);
 
-        //         lc_memcpy(block_as(&frame.block) + offset, data, size);
-        //         frame.status.store(LCBlockBufferPoolFrameStatus::Dirty,
-        //                            std::memory_order_release);
-        //         __lc_add_lc_block_usage_count(frame.usage_count);
-        //         return;
-        //     }
-        // }
+                if ((status != FrameStatus::ValidClean &&
+                     status != FrameStatus::Dirty) ||
+                    frame.block_id.load(std::memory_order_relaxed) !=
+                        block_id) {
+                    continue;  // Retry if the frame is not valid or does not
+                               // match
+                }
+
+                lc_memcpy(block_as(&frame.block) + offset, data, size);
+                frame.status.store(LCBlockBufferPoolFrameStatus::Dirty,
+                                   std::memory_order_release);
+                __lc_add_lc_block_usage_count(frame.usage_count);
+                return;
+            }
+        }
+        LC_ASSERT(false, "Failed to write block");
     }
 
     void flush_block(uint32_t block_id, LCTaskPriority priority,
-                     std::shared_ptr<std::atomic<bool>> cancel_token) {
-        // uint32_t frame_index = -1;
-        // {
-        //     std::shared_lock<std::shared_mutex>
-        //     shared_lock(frame_map_mutex_); auto it =
-        //     frame_map_.find(block_id); if (it == frame_map_.end()) {
-        //         return;
-        //     }
-        //     frame_index = it->second;
-        // }
+                     CancelTokenType cancel_token) {
+        if (task_is_cancelled(cancel_token)) {
+            return;  // Exit if the task is cancelled
+        }
+        size_t frame_index = LC_BLOCK_ILLEGAL_ID;
+        {
+            std::shared_lock<std::shared_mutex> shared_lock(frame_map_lock_);
+            auto                                it = frame_map_.find(block_id);
+            if (it == frame_map_.end()) {
+                return;
+            }
+            frame_index = it->second;
+        }
+        if (task_is_cancelled(cancel_token)) {
+            return;  // Exit if the task is cancelled
+        }
+        LC_ASSERT(frame_index != LC_BLOCK_ILLEGAL_ID,
+                  "Frame index not found for block ID");
+        {
+            FrameReadWriteLock lock(frame_locks_[frame_index],
+                                    FrameLockType::Write);
+            auto              &frame = *frame_pool_[frame_index];
 
-        // LC_ASSERT(frame_index != -1, "Frame index not found for block ID");
-        // {
-        //     FrameReadWriteLock lock(frame_locks_[frame_index],
-        //                             FrameLockType::Write);
-        //     auto              &frame = frames_[frame_index];
-
-        //     if (frame.status.load(std::memory_order_relaxed) !=
-        //             LCBlockBufferPoolFrameStatus::Dirty ||
-        //         frame.block_id.load(std::memory_order_relaxed) != block_id) {
-        //         return;  // Skip if the frame is not dirty or does not match
-        //     }
-        //     frame.status.store(LCBlockBufferPoolFrameStatus::WriteInProgress,
-        //                        std::memory_order_release);
-        //     submit_flush_task(block_id, frame_index, priority, cancel_token);
-        // }
+            if (frame.status.load(std::memory_order_relaxed) !=
+                    LCBlockBufferPoolFrameStatus::Dirty ||
+                frame.block_id.load(std::memory_order_relaxed) != block_id) {
+                return;  // Skip if the frame is not dirty or does not match
+            }
+            frame.status.store(LCBlockBufferPoolFrameStatus::FlushInProgress,
+                               std::memory_order_release);
+            if (task_is_cancelled(cancel_token)) {
+                return;  // Exit if the task is cancelled
+            }
+            submit_flush_task(block_id,
+                              frame_index,
+                              priority,
+                              LCTraceTypeID::FlushTask,
+                              cancel_token);
+        }
     }
 
-    void flush_all(LCTaskPriority priority) {
-        // for (uint32_t i = 0; i < pool_size_; ++i) {
-        //     LCBlockBufferPoolFrame &frame           = frames_[i];
-        //     FrameStatus             expected_status = FrameStatus::Dirty;
-        //     if (!frame.status.compare_exchange_strong(
-        //             expected_status,
-        //             FrameStatus::WriteInProgress,
-        //             std::memory_order_acq_rel)) {
-        //         continue;  // Retry if the frame is not in the expected state
-        //     }
+    void flush_all(LCTaskPriority priority, CancelTokenType cancel_token) {
+        for (uint32_t i = 0; i < frame_pool_size_; ++i) {
+            LCBlockBufferPoolFrame &frame           = *frame_pool_[i];
+            FrameStatus             expected_status = FrameStatus::Dirty;
+            if (task_is_cancelled(cancel_token)) {
+                return;  // Exit if the task is cancelled
+            }
+            if (!frame.status.compare_exchange_strong(
+                    expected_status,
+                    FrameStatus::FlushInProgress,
+                    std::memory_order_acq_rel)) {
+                continue;  // Retry if the frame is not in the expected state
+            }
 
-        //     submit_flush_task(frame.block_id, i, priority, nullptr);
-        // }
+            submit_flush_task(frame.block_id,
+                              i,
+                              priority,
+                              LCTraceTypeID::BackgroundFlushTask,
+                              cancel_token);
+        }
     }
 
     void find_or_load_frame_with_version(uint32_t block_id, size_t &frame_index,
-                                         uint64_t      &version,
-                                         LCTaskPriority priority) {
-        // frame_index = find_frame(block_id, priority);
-        // version =
-        // frames_[frame_index].version.load(std::memory_order_acquire);
+                                         uint64_t       &version,
+                                         LCTaskPriority  priority,
+                                         CancelTokenType cancel_token) {
+        frame_index = acquire_frame(block_id, priority, cancel_token);
+        if (frame_index == LC_BLOCK_ILLEGAL_ID) {
+            return;
+        }
+        version =
+            frame_pool_[frame_index]->version.load(std::memory_order_acquire);
     }
 
     void lock_frame(size_t frame_index, uint64_t &version,
                     FrameLockType &lock_type, FrameGuard &guard) {
-        // guard = FrameGuard(&frames_[frame_index],
-        //                    version,
-        //                    frame_locks_[frame_index],
-        //                    lock_type);
+        guard = FrameGuard(frame_pool_[frame_index],
+                           version,
+                           frame_locks_[frame_index],
+                           lock_type);
     }
 
     void lock_block(uint32_t block_id, FrameLockType &lock_type,
-                    FrameGuard &guard, LCTaskPriority priority) {
-        // size_t   frame_index = 0;
-        // uint64_t version     = 0;
+                    FrameGuard &guard, LCTaskPriority priority,
+                    CancelTokenType cancel_token) {
+        size_t   frame_index = 0;
+        uint64_t version     = 0;
 
-        // find_or_load_frame_with_version(block_id,
-        //                                 frame_index,
-        //                                 version,
-        //                                 priority);
-        // lock_frame(frame_index, version, lock_type, guard);
+        find_or_load_frame_with_version(block_id,
+                                        frame_index,
+                                        version,
+                                        priority,
+                                        cancel_token);
+        if (frame_index == LC_BLOCK_ILLEGAL_ID) {
+            return;
+        }
+        if (task_is_cancelled(cancel_token)) {
+            return;  // Exit if the task is cancelled
+        }
+        lock_frame(frame_index, version, lock_type, guard);
+        return;
     }
 
 private:
 
     size_t acquire_frame(uint32_t block_id, LCTaskPriority priority,
-                         std::shared_ptr<std::atomic<bool>> cancel_token) {
+                         CancelTokenType cancel_token) {
         while (true) {
+            if (task_is_cancelled(cancel_token)) {
+                return LC_BLOCK_ILLEGAL_ID;  // Exit if the task is cancelled
+            }
+
             {
                 std::shared_lock<std::shared_mutex> shared_lock(
                     frame_map_lock_);
@@ -435,6 +499,9 @@ private:
                 }
             }
 
+            if (task_is_cancelled(cancel_token)) {
+                return LC_BLOCK_ILLEGAL_ID;  // Exit if the task is cancelled
+            }
             // Not found, write map
             std::unique_lock<std::shared_mutex> write_lock(frame_map_lock_);
             // Double-check locking to avoid ABA problem, when we release the
@@ -446,7 +513,7 @@ private:
 
             // check whether existing invalid frame can be reused
             for (size_t i = 0; i < frame_pool_size_; ++i) {
-                Frame &frame = frame_pool_[i];
+                Frame &frame = *frame_pool_[i];
                 // Since the frame is invalid, it is unnecessary to check the
                 // other values.
                 FrameStatus expected_status = FrameStatus::Invalid;
@@ -470,10 +537,15 @@ private:
                     bool ok =
                         submit_read_task(block_id, i, priority, cancel_token);
                     if (!ok) {
+                        // continue;
                         return LC_BLOCK_ILLEGAL_ID;  // Indicate failure
                     }
                     return i;
                 }
+            }
+
+            if (task_is_cancelled(cancel_token)) {
+                return LC_BLOCK_ILLEGAL_ID;  // Exit if the task is cancelled
             }
 
             // use clock algorithm to find a reusable frame
@@ -481,7 +553,7 @@ private:
             LC_ASSERT(frame_index >= 0 && frame_index < frame_pool_size_,
                       "Invalid frame index found during eviction");
 
-            Frame   &frame = frame_pool_[frame_index];
+            Frame   &frame = *frame_pool_[frame_index];
             uint32_t old_block_id =
                 frame.block_id.load(std::memory_order_relaxed);
             frame_map_.erase(old_block_id);  // Remove from frame_map_
@@ -500,6 +572,7 @@ private:
             bool ok =
                 submit_read_task(block_id, frame_index, priority, cancel_token);
             if (!ok) {
+                // continue;
                 return LC_BLOCK_ILLEGAL_ID;
             }
             return frame_index;  // Return the new frame index
@@ -514,7 +587,7 @@ private:
             size_t frame_index =
                 clock_hand_.fetch_add(1, std::memory_order_relaxed) %
                 frame_pool_size_;
-            Frame &frame = frame_pool_[frame_index];
+            Frame &frame = *frame_pool_[frame_index];
 
             if (frame.ref_count.load(std::memory_order_acquire) > 0) {
                 continue;  // Skip if the frame is still in use
@@ -551,13 +624,21 @@ private:
                 break;  // Exit if the pool is stopped
             }
 
-            flush_all(LCTaskPriority::Background);
+            CancelTokenType cancel_token =
+                std::make_shared<std::atomic<bool>>(false);
+
+            flush_all(LCTaskPriority::Background, cancel_token);
+
+            if (!running_.load(std::memory_order_acquire)) {
+                cancel_token->store(true, std::memory_order_release);
+                break;  // Exit if the pool is stopped
+            }
         }
     }
 
     void submit_flush_task(uint32_t block_id, size_t frame_index,
                            LCTaskPriority priority, LCTraceTypeID trace_type,
-                           std::shared_ptr<std::atomic<bool>> cancel_token) {
+                           CancelTokenType cancel_token) {
         LC_ASSERT(write_thread_pool_, "Write thread pool is not initialized");
         ThreadPoolContextMetaData metadata {};
         metadata.listener_id = thread_name_;
@@ -566,7 +647,7 @@ private:
         metadata.priority  = priority;
 
         uint64_t frame_version =
-            frame_pool_[frame_index].version.load(std::memory_order_acquire);
+            frame_pool_[frame_index]->version.load(std::memory_order_acquire);
 
         std::shared_ptr<FrameIndexSlot> slot =
             std::make_shared<FrameIndexSlot>();
@@ -576,24 +657,24 @@ private:
 
         auto task = std::make_shared<LCLambdaTask<std::function<void()>>>(
             [this, block_id, slot, frame_version, cancel_token]() {
-            if (cancel_token && cancel_token->load(std::memory_order_acquire)) {
-                if (frame_pool_[slot->frame_index].status.load(
+            if (task_is_cancelled(cancel_token)) {
+                if (frame_pool_[slot->frame_index]->status.load(
                         std::memory_order_acquire) ==
                         FrameStatus::FlushInProgress &&
-                    frame_pool_[slot->frame_index].version.load(
+                    frame_pool_[slot->frame_index]->version.load(
                         std::memory_order_acquire) == frame_version) {
                     // If the frame is in flush in progress, we need to
                     // cancel the flush
                     slot->ready.store(FrameIndexSlotStatus::Cancelled,
                                       std::memory_order_release);
                 }
-                frame_pool_[slot->frame_index].status.store(
+                frame_pool_[slot->frame_index]->status.store(
                     FrameStatus::Dirty,
                     std::memory_order_release);
                 return;
             }
             // TODO: It may have other method
-            if (frame_pool_[slot->frame_index].status.load(
+            if (frame_pool_[slot->frame_index]->status.load(
                     std::memory_order_acquire) !=
                 FrameStatus::FlushInProgress) {
                 slot->ready.store(FrameIndexSlotStatus::StatusUnexpected,
@@ -601,14 +682,14 @@ private:
                 return;
             }
 
-            if (frame_pool_[slot->frame_index].version.load(
+            if (frame_pool_[slot->frame_index]->version.load(
                     std::memory_order_acquire) != frame_version) {
                 slot->ready.store(FrameIndexSlotStatus::VersionUnexpected,
                                   std::memory_order_release);
                 return;
             }
 
-            if (frame_pool_[slot->frame_index].block_id.load(
+            if (frame_pool_[slot->frame_index]->block_id.load(
                     std::memory_order_acquire) != block_id) {
                 slot->ready.store(FrameIndexSlotStatus::StatusUnexpected,
                                   std::memory_order_release);
@@ -616,9 +697,9 @@ private:
             }
 
             block_device_->write_block(block_id,
-                                       frame_pool_[slot->frame_index].block);
+                                       frame_pool_[slot->frame_index]->block);
 
-            if (frame_pool_[slot->frame_index].status.load(
+            if (frame_pool_[slot->frame_index]->status.load(
                     std::memory_order_acquire) !=
                 FrameStatus::FlushInProgress) {
                 slot->ready.store(FrameIndexSlotStatus::StatusUnexpected,
@@ -626,14 +707,14 @@ private:
                 return;
             }
 
-            if (frame_pool_[slot->frame_index].version.load(
+            if (frame_pool_[slot->frame_index]->version.load(
                     std::memory_order_acquire) != frame_version) {
                 slot->ready.store(FrameIndexSlotStatus::VersionUnexpected,
                                   std::memory_order_release);
                 return;  // Skip if the frame version has changed
             }
 
-            frame_pool_[slot->frame_index].status.store(
+            frame_pool_[slot->frame_index]->status.store(
                 FrameStatus::ValidClean,
                 std::memory_order_release);
             slot->ready.store(FrameIndexSlotStatus::Ready,
@@ -644,9 +725,9 @@ private:
         write_thread_pool_->wait_and_submit_task(context_factory);
     }
 
-    LC_NODISCARD bool submit_read_task(
-        uint32_t block_id, size_t frame_index, LCTaskPriority priority,
-        std::shared_ptr<std::atomic<bool>> cancel_token) {
+    LC_NODISCARD bool submit_read_task(uint32_t block_id, size_t frame_index,
+                                       LCTaskPriority  priority,
+                                       CancelTokenType cancel_token) {
         LC_ASSERT(read_thread_pool_, "Read thread pool is not initialized");
         LC_ASSERT(frame_index < frame_pool_size_,
                   "Frame index out of bounds for block buffer pool");
@@ -665,23 +746,23 @@ private:
                           std::memory_order_relaxed);
 
         uint64_t frame_version =
-            frame_pool_[frame_index].version.load(std::memory_order_acquire);
+            frame_pool_[frame_index]->version.load(std::memory_order_acquire);
 
         auto task = std::make_shared<LCLambdaTask<std::function<void()>>>(
             [this, block_id, slot, frame_version, cancel_token]() {
-            if (cancel_token && cancel_token->load(std::memory_order_acquire)) {
+            if (task_is_cancelled(cancel_token)) {
                 slot->ready.store(FrameIndexSlotStatus::Cancelled,
                                   std::memory_order_release);
                 return;  // Exit if the task is cancelled
             }
-            if (frame_pool_[slot->frame_index].status.load(
+            if (frame_pool_[slot->frame_index]->status.load(
                     std::memory_order_acquire) != FrameStatus::ReadInProgress) {
                 slot->ready.store(FrameIndexSlotStatus::StatusUnexpected,
                                   std::memory_order_release);
                 return;
             }
 
-            if (frame_pool_[slot->frame_index].version.load(
+            if (frame_pool_[slot->frame_index]->version.load(
                     std::memory_order_acquire) != frame_version) {
                 slot->ready.store(FrameIndexSlotStatus::VersionUnexpected,
                                   std::memory_order_release);
@@ -689,7 +770,7 @@ private:
             }
 
             block_device_->read_block(block_id,
-                                      frame_pool_[slot->frame_index].block);
+                                      frame_pool_[slot->frame_index]->block);
             // frame_pool_[slot.frame_index].status.store(
             //     FrameStatus::ValidClean,
             //     std::memory_order_release);
@@ -709,11 +790,11 @@ private:
         FrameIndexSlotStatus status =
             slot->ready.load(std::memory_order_acquire);
         if (status == FrameIndexSlotStatus::Ready) {
-            if (frame_pool_[frame_index].status.load(
+            if (frame_pool_[frame_index]->status.load(
                     std::memory_order_acquire) == FrameStatus::ReadInProgress &&
-                frame_pool_[frame_index].version.load(
+                frame_pool_[frame_index]->version.load(
                     std::memory_order_acquire) == frame_version) {
-                frame_pool_[frame_index].status.store(
+                frame_pool_[frame_index]->status.store(
                     FrameStatus::ValidClean,
                     std::memory_order_release);
                 return true;
@@ -724,40 +805,42 @@ private:
             frame_map_.erase(block_id);  // 删除占位映射
         }
         // If the task was cancelled, we need to reset the frame status
-        frame_pool_[frame_index].status.store(FrameStatus::Invalid,
-                                              std::memory_order_release);
-        frame_pool_[frame_index].block_id.store(LC_BLOCK_ILLEGAL_ID,
-                                                std::memory_order_release);
-        frame_pool_[frame_index].ref_count.store(0, std::memory_order_release);
-        frame_pool_[frame_index].usage_count.store(0,
-                                                   std::memory_order_release);
-        frame_pool_[frame_index].version.fetch_add(1,
-                                                   std::memory_order_release);
+        frame_pool_[frame_index]->status.store(FrameStatus::Invalid,
+                                               std::memory_order_release);
+        frame_pool_[frame_index]->block_id.store(LC_BLOCK_ILLEGAL_ID,
+                                                 std::memory_order_release);
+        frame_pool_[frame_index]->ref_count.store(0, std::memory_order_release);
+        frame_pool_[frame_index]->usage_count.store(0,
+                                                    std::memory_order_release);
+        frame_pool_[frame_index]->version.fetch_add(1,
+                                                    std::memory_order_release);
         return false;
     }
 
     void init_resources() {
-        frame_pool_  = std::make_unique<Frame[]>(frame_pool_size_);
+        frame_pool_ =
+            std::make_unique<std::shared_ptr<Frame>[]>(frame_pool_size_);
         frame_locks_ = std::make_unique<std::shared_ptr<std::shared_mutex>[]>(
             frame_pool_size_);
         wait_strategy_ = std::make_unique<LCConditionVariableWaitStrategy>();
         for (size_t i = 0; i < frame_pool_size_; ++i) {
             frame_locks_[i] = std::make_shared<std::shared_mutex>();
-            frame_pool_[i].status.store(LCBlockBufferPoolFrameStatus::Invalid,
-                                        std::memory_order_relaxed);
-            frame_pool_[i].ref_count.store(0, std::memory_order_relaxed);
-            frame_pool_[i].version.store(0, std::memory_order_relaxed);
-            frame_pool_[i].usage_count.store(0, std::memory_order_relaxed);
-            frame_pool_[i].block_id.store(LC_BLOCK_ILLEGAL_ID,
-                                          std::memory_order_relaxed);
-            block_clear(&frame_pool_[i].block);
+            frame_pool_[i]  = std::make_shared<Frame>();
+            frame_pool_[i]->status.store(LCBlockBufferPoolFrameStatus::Invalid,
+                                         std::memory_order_relaxed);
+            frame_pool_[i]->ref_count.store(0, std::memory_order_relaxed);
+            frame_pool_[i]->version.store(0, std::memory_order_relaxed);
+            frame_pool_[i]->usage_count.store(0, std::memory_order_relaxed);
+            frame_pool_[i]->block_id.store(LC_BLOCK_ILLEGAL_ID,
+                                           std::memory_order_relaxed);
+            block_clear(&frame_pool_[i]->block);
         }
     }
 
     void free_resources() {}
 
     size_t                                                frame_pool_size_;
-    std::unique_ptr<Frame[]>                              frame_pool_;
+    std::unique_ptr<std::shared_ptr<Frame>[]>             frame_pool_;
     std::unique_ptr<std::shared_ptr<std::shared_mutex>[]> frame_locks_;
     std::unordered_map<uint32_t, uint32_t>
                       frame_map_;  // Maps block_id to frame index
