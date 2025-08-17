@@ -180,6 +180,20 @@ class LCBlockBufferPool {
         size_t                            frame_index;
     };
 
+    enum class FrameAcquireResult {
+        ReadThreadPoolClose,
+        TaskCancelled,
+        Success,
+        UnknownError,
+    };
+
+    enum class TaskSubmitResult {
+        Success,
+        Cancelled,
+        ThreadPoolClose,
+        UnknownError,
+    };
+
     class FrameReadWriteLock {
         using ReadLock  = std::shared_lock<std::shared_mutex>;
         using WriteLock = std::unique_lock<std::shared_mutex>;
@@ -271,10 +285,14 @@ public:
             if (task_is_cancelled(cancel_token)) {
                 return;  // Exit if the task is cancelled
             }
-            size_t frame_index =
-                acquire_frame(block_id, priority, cancel_token);
-            if (frame_index == LC_BLOCK_ILLEGAL_ID) {
-                continue;
+            size_t             frame_index = LC_BLOCK_ILLEGAL_ID;
+            FrameAcquireResult result =
+                acquire_frame(block_id, priority, cancel_token, frame_index);
+            if (result == FrameAcquireResult::ReadThreadPoolClose ||
+                result == FrameAcquireResult::TaskCancelled) {
+                return;  // Exit if the read thread pool is closed
+            } else if (result == FrameAcquireResult::UnknownError) {
+                return;
             }
             {
                 FrameReadWriteLock lock(frame_locks_[frame_index],
@@ -310,10 +328,14 @@ public:
             if (task_is_cancelled(cancel_token)) {
                 return;  // Exit if the task is cancelled
             }
-            size_t frame_index =
-                acquire_frame(block_id, priority, cancel_token);
-            if (frame_index == LC_BLOCK_ILLEGAL_ID) {
-                continue;  // Retry if the frame index is illegal
+            size_t             frame_index = LC_BLOCK_ILLEGAL_ID;
+            FrameAcquireResult result =
+                acquire_frame(block_id, priority, cancel_token, frame_index);
+            if (result == FrameAcquireResult::ReadThreadPoolClose ||
+                result == FrameAcquireResult::TaskCancelled) {
+                return;  // Exit if the read thread pool is closed
+            } else if (result == FrameAcquireResult::UnknownError) {
+                return;
             }
             {
                 FrameReadWriteLock lock(frame_locks_[frame_index],
@@ -347,8 +369,15 @@ public:
             if (task_is_cancelled(cancel_token)) {
                 return;  // Exit if the task is cancelled
             }
-            size_t frame_index =
-                acquire_frame(block_id, priority, cancel_token);
+            size_t             frame_index = LC_BLOCK_ILLEGAL_ID;
+            FrameAcquireResult result =
+                acquire_frame(block_id, priority, cancel_token, frame_index);
+            if (result == FrameAcquireResult::ReadThreadPoolClose ||
+                result == FrameAcquireResult::TaskCancelled) {
+                return;  // Exit if the read thread pool is closed
+            } else if (result == FrameAcquireResult::UnknownError) {
+                return;
+            }
             {
                 FrameReadWriteLock lock(frame_locks_[frame_index],
                                         FrameLockType::Write);
@@ -443,7 +472,17 @@ public:
                                          uint64_t       &version,
                                          LCTaskPriority  priority,
                                          CancelTokenType cancel_token) {
-        frame_index = acquire_frame(block_id, priority, cancel_token);
+        // frame_index = acquire_frame(block_id, priority, cancel_token);
+
+        frame_index = LC_BLOCK_ILLEGAL_ID;
+        FrameAcquireResult result =
+            acquire_frame(block_id, priority, cancel_token, frame_index);
+        if (result == FrameAcquireResult::ReadThreadPoolClose ||
+            result == FrameAcquireResult::TaskCancelled) {
+            return;  // Exit if the read thread pool is closed
+        } else if (result == FrameAcquireResult::UnknownError) {
+            return;
+        }
         if (frame_index == LC_BLOCK_ILLEGAL_ID) {
             return;
         }
@@ -482,11 +521,13 @@ public:
 
 private:
 
-    size_t acquire_frame(uint32_t block_id, LCTaskPriority priority,
-                         CancelTokenType cancel_token) {
+    FrameAcquireResult acquire_frame(uint32_t block_id, LCTaskPriority priority,
+                                     CancelTokenType cancel_token,
+                                     size_t         &result_frame_index) {
         while (true) {
             if (task_is_cancelled(cancel_token)) {
-                return LC_BLOCK_ILLEGAL_ID;  // Exit if the task is cancelled
+                return FrameAcquireResult::TaskCancelled;  // Exit if the task
+                                                           // is cancelled
             }
 
             {
@@ -495,12 +536,15 @@ private:
 
                 auto it = frame_map_.find(block_id);
                 if (it != frame_map_.end()) {
-                    return it->second;  // Return existing frame index
+                    result_frame_index =
+                        it->second;  // Return existing frame index
+                    return FrameAcquireResult::Success;
                 }
             }
 
             if (task_is_cancelled(cancel_token)) {
-                return LC_BLOCK_ILLEGAL_ID;  // Exit if the task is cancelled
+                return FrameAcquireResult::TaskCancelled;  // Exit if the task
+                                                           // is cancelled
             }
             // Not found, write map
             std::unique_lock<std::shared_mutex> write_lock(frame_map_lock_);
@@ -508,7 +552,8 @@ private:
             // read lock, another thread may have inserted the block_id.
             auto it = frame_map_.find(block_id);
             if (it != frame_map_.end()) {
-                return it->second;  // Return existing frame index
+                result_frame_index = it->second;
+                return FrameAcquireResult::Success;
             }
 
             // check whether existing invalid frame can be reused
@@ -534,18 +579,35 @@ private:
 
                     write_lock.unlock();
 
-                    bool ok =
+                    TaskSubmitResult result =
                         submit_read_task(block_id, i, priority, cancel_token);
-                    if (!ok) {
-                        // continue;
-                        return LC_BLOCK_ILLEGAL_ID;  // Indicate failure
+                    switch (result) {
+                        case TaskSubmitResult::Success :
+                            // Task submitted successfully
+                            break;
+                        case TaskSubmitResult::Cancelled :
+                            // Task was cancelled
+                            return FrameAcquireResult::TaskCancelled;
+                        case TaskSubmitResult::ThreadPoolClose :
+                            // Thread pool is closed
+                            return FrameAcquireResult::ReadThreadPoolClose;
+                        case TaskSubmitResult::UnknownError :
+                        default                             : return FrameAcquireResult::UnknownError;
                     }
-                    return i;
+                    // if (!ok) {
+                    //     // continue;
+                    //     return LC_BLOCK_ILLEGAL_ID;  // Indicate failure
+                    // }
+                    result_frame_index = i;  // Return the new frame index
+                    return FrameAcquireResult::Success;
                 }
             }
 
             if (task_is_cancelled(cancel_token)) {
-                return LC_BLOCK_ILLEGAL_ID;  // Exit if the task is cancelled
+                result_frame_index = LC_BLOCK_ILLEGAL_ID;
+                return FrameAcquireResult::TaskCancelled;  // Exit if the task
+                                                           // is cancelled
+                // return LC_BLOCK_ILLEGAL_ID;  // Exit if the task is cancelled
             }
 
             // use clock algorithm to find a reusable frame
@@ -569,16 +631,26 @@ private:
                                std::memory_order_release);
 
             write_lock.unlock();
-            bool ok =
+            TaskSubmitResult result =
                 submit_read_task(block_id, frame_index, priority, cancel_token);
-            if (!ok) {
-                // continue;
-                return LC_BLOCK_ILLEGAL_ID;
+            switch (result) {
+                case TaskSubmitResult::Success :
+                    // Task submitted successfully
+                    break;
+                case TaskSubmitResult::Cancelled :
+                    // Task was cancelled
+                    return FrameAcquireResult::TaskCancelled;
+                case TaskSubmitResult::ThreadPoolClose :
+                    // Thread pool is closed
+                    return FrameAcquireResult::ReadThreadPoolClose;
+                case TaskSubmitResult::UnknownError :
+                default                             : return FrameAcquireResult::UnknownError;
             }
-            return frame_index;  // Return the new frame index
+            result_frame_index = frame_index;  // Return the new frame
+            return FrameAcquireResult::Success;
         }
         LC_ASSERT(false, "No reusable frame found, this should not happen");
-        return 0;
+        return FrameAcquireResult::UnknownError;  // Should not reach here
     }
 
     // Clock sweep to find a reusable frame
@@ -725,9 +797,9 @@ private:
         write_thread_pool_->wait_and_submit_task(context_factory);
     }
 
-    LC_NODISCARD bool submit_read_task(uint32_t block_id, size_t frame_index,
-                                       LCTaskPriority  priority,
-                                       CancelTokenType cancel_token) {
+    LC_NODISCARD TaskSubmitResult
+    submit_read_task(uint32_t block_id, size_t frame_index,
+                     LCTaskPriority priority, CancelTokenType cancel_token) {
         LC_ASSERT(read_thread_pool_, "Read thread pool is not initialized");
         LC_ASSERT(frame_index < frame_pool_size_,
                   "Frame index out of bounds for block buffer pool");
@@ -779,7 +851,18 @@ private:
         });
 
         ContextFactory context_factory(meta, task);
-        read_thread_pool_->wait_and_submit_task(context_factory);
+        bool           submit_success =
+            read_thread_pool_->wait_and_submit_task(context_factory);
+
+        if (!submit_success) {
+            slot->ready.store(FrameIndexSlotStatus::Cancelled,
+                              std::memory_order_release);
+            if (read_thread_pool_->is_draining() ||
+                read_thread_pool_->is_stopped()) {
+                return TaskSubmitResult::ThreadPoolClose;
+            }
+            return TaskSubmitResult::UnknownError;
+        }
 
         while (slot->ready.load(std::memory_order_acquire) ==
                FrameIndexSlotStatus::Processing) {
@@ -797,7 +880,7 @@ private:
                 frame_pool_[frame_index]->status.store(
                     FrameStatus::ValidClean,
                     std::memory_order_release);
-                return true;
+                return TaskSubmitResult::Success;
             }
         }
         {
@@ -814,7 +897,7 @@ private:
                                                     std::memory_order_release);
         frame_pool_[frame_index]->version.fetch_add(1,
                                                     std::memory_order_release);
-        return false;
+        return TaskSubmitResult::Cancelled;
     }
 
     void init_resources() {

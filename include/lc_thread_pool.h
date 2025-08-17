@@ -134,6 +134,7 @@ public:
     LCWeightedRoundRobinScheduler &operator=(LCWeightedRoundRobinScheduler &&) =
         delete;
 
+    // TODO maybe use WDRR
     bool try_schedule(LCMPMCMultiPriorityQueue<T, PriorityType> &queue,
                       T                                         &task) {
         const size_t num_priorities =
@@ -152,6 +153,29 @@ public:
             return w == 0;
         })) {
             reset_weights();
+        }
+
+        if (!queue.is_empty()) {
+            reset_weights();
+            for (size_t i = 0; i < num_priorities; ++i) {
+                if (queue.dequeue(task, static_cast<PriorityType>(i))) {
+                    if (weights_[i] > 0) {
+                        weights_[i]--;
+                    }
+                    current_index_ = (i + 1) % num_priorities;
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    bool drain_once(LCMPMCMultiPriorityQueue<T, PriorityType> &queue, T &task) {
+        const size_t num = static_cast<size_t>(PriorityType::NUM_PRIORITIES);
+        for (size_t i = 0; i < num; ++i) {
+            if (queue.dequeue(task, static_cast<PriorityType>(i))) {
+                return true;
+            }
         }
         return false;
     }
@@ -342,6 +366,20 @@ private:
                     return stop_.load() || !task_queue_.is_empty();
                 });
             }
+            tick_heartbeat(thread_index);
+            if (draining_.load(std::memory_order_acquire)) {
+                if (scheduler_.drain_once(task_queue_, context)) {
+                    last_heartbeat_[thread_index].store(
+                        std::chrono::steady_clock::now(),
+                        std::memory_order_relaxed);
+                    context();
+                }
+                if (task_queue_.is_empty()) {
+                    break;
+                }
+                continue;
+            }
+
             if (scheduler_.try_schedule(task_queue_, context)) {
                 last_heartbeat_[thread_index].store(
                     std::chrono::steady_clock::now(),
@@ -358,7 +396,7 @@ private:
 
     void watchdog_loop() {
         const auto timeout_duration =
-            std::chrono::seconds(100);  // Adjust as needed
+            std::chrono::seconds(10);  // Adjust as needed
         while (!stop_.load()) {
             std::unique_lock<std::mutex> lock(watchdog_mutex_);
             watchdog_cv_.wait_for(lock, timeout_duration, [this]() {
@@ -406,6 +444,15 @@ private:
         }
         if (watchdog_thread_.joinable()) {
             watchdog_thread_.join();
+        }
+    }
+
+    inline void tick_heartbeat(size_t thread_index) {
+        auto now = std::chrono::steady_clock::now();
+        auto last =
+            last_heartbeat_[thread_index].load(std::memory_order_relaxed);
+        if (now - last > std::chrono::seconds(5)) {
+            last_heartbeat_[thread_index].store(now, std::memory_order_relaxed);
         }
     }
 

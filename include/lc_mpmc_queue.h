@@ -192,7 +192,7 @@ public:
         LC_ASSERT(index < static_cast<size_t>(PriorityType::NUM_PRIORITIES),
                   "Invalid priority index");
         if (queues_[index].enqueue(std::move(item))) {
-            size_.fetch_add(1, std::memory_order_relaxed);
+            size_.fetch_add(1, std::memory_order_acq_rel);
             return true;
         }
         return false;  // Queue is full
@@ -223,7 +223,7 @@ public:
             return false;  // Queue is empty
         }
         if (queues_[index].dequeue(item)) {
-            size_.fetch_sub(1, std::memory_order_relaxed);
+            size_.fetch_sub(1, std::memory_order_acq_rel);
             return true;
         }
         return false;  // Queue is empty or dequeue failed
