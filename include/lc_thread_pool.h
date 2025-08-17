@@ -150,7 +150,86 @@ public:
     LCWeightedRoundRobinScheduler &operator=(LCWeightedRoundRobinScheduler &&) =
         delete;
 
-    // TODO maybe use WDRR
+    bool try_schedule(LCMPMCMultiPriorityQueue<T, PriorityType> &queue,
+                      T                                         &task) {
+        static const size_t num_priorities =
+            static_cast<size_t>(PriorityType::NUM_PRIORITIES);
+        for (size_t attempt = 0; attempt < num_priorities; ++attempt) {
+            size_t index = current_index_ % num_priorities;
+            if (weights_[index] > 0) {
+                if (queue.dequeue(task, static_cast<PriorityType>(index))) {
+                    weights_[index]--;
+                    return true;
+                }
+            }
+            current_index_ = (current_index_ + 1) % num_priorities;
+        }
+        if (std::all_of(weights_.begin(), weights_.end(), [](uint32_t w) {
+            return w == 0;
+        })) {
+            reset_weights();
+        }
+
+        if (!queue.is_empty()) {
+            reset_weights();
+            for (size_t i = 0; i < num_priorities; ++i) {
+                if (queue.dequeue(task, static_cast<PriorityType>(i))) {
+                    if (weights_[i] > 0) {
+                        weights_[i]--;
+                    }
+                    current_index_ = (i + 1) % num_priorities;
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    bool drain_once(LCMPMCMultiPriorityQueue<T, PriorityType> &queue, T &task) {
+        const size_t num = static_cast<size_t>(PriorityType::NUM_PRIORITIES);
+        for (size_t i = 0; i < num; ++i) {
+            if (queue.dequeue(task, static_cast<PriorityType>(i))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+private:
+
+    void reset_weights() {
+        weights_ = LCPriorityWeights<PriorityType>::get_weights();
+    }
+
+    template <typename U>
+    static constexpr bool always_false_v = false;
+
+    size_t current_index_ = 0;
+    std::array<uint32_t, static_cast<size_t>(PriorityType::NUM_PRIORITIES)>
+        weights_;
+};
+
+template <typename T, typename PriorityType>
+class LCDeficitWeightedRoundRobinScheduler {
+    static_assert(std::is_same<PriorityType, LCTaskPriority>::value,
+                  "Invalid priority type, must be LCTaskPriority");
+public:
+
+    LCDeficitWeightedRoundRobinScheduler() {
+        reset_weights();
+    }
+
+    ~LCDeficitWeightedRoundRobinScheduler() = default;
+
+    LCDeficitWeightedRoundRobinScheduler(
+        const LCDeficitWeightedRoundRobinScheduler &) = delete;
+    LCDeficitWeightedRoundRobinScheduler &operator=(
+        const LCDeficitWeightedRoundRobinScheduler &) = delete;
+    LCDeficitWeightedRoundRobinScheduler(
+        LCDeficitWeightedRoundRobinScheduler &&) = delete;
+    LCDeficitWeightedRoundRobinScheduler &operator=(
+        LCDeficitWeightedRoundRobinScheduler &&) = delete;
+
     bool try_schedule(LCMPMCMultiPriorityQueue<T, PriorityType> &queue,
                       T                                         &task) {
         static const size_t num_priorities =
@@ -168,38 +247,6 @@ public:
             }
         }
         return false;
-
-        // const size_t num_priorities =
-        //     static_cast<size_t>(PriorityType::NUM_PRIORITIES);
-        // for (size_t attempt = 0; attempt < num_priorities; ++attempt) {
-        //     size_t index = current_index_ % num_priorities;
-        //     if (weights_[index] > 0) {
-        //         if (queue.dequeue(task, static_cast<PriorityType>(index))) {
-        //             weights_[index]--;
-        //             return true;
-        //         }
-        //     }
-        //     current_index_ = (current_index_ + 1) % num_priorities;
-        // }
-        // if (std::all_of(weights_.begin(), weights_.end(), [](uint32_t w) {
-        //     return w == 0;
-        // })) {
-        //     reset_weights();
-        // }
-
-        // if (!queue.is_empty()) {
-        //     reset_weights();
-        //     for (size_t i = 0; i < num_priorities; ++i) {
-        //         if (queue.dequeue(task, static_cast<PriorityType>(i))) {
-        //             if (weights_[i] > 0) {
-        //                 weights_[i]--;
-        //             }
-        //             current_index_ = (i + 1) % num_priorities;
-        //             return true;
-        //         }
-        //     }
-        // }
-        // return false;
     }
 
     bool drain_once(LCMPMCMultiPriorityQueue<T, PriorityType> &queue, T &task) {
@@ -386,8 +433,9 @@ private:
     void worker_pool(const std::string &thread_name, size_t thread_index,
                      std::shared_ptr<std::atomic<bool>> cancel_token) {
         // Run the thread's main loop
-        LCWeightedRoundRobinScheduler<ContextType, PriorityType> scheduler_;
-        ContextType                                              context;
+        LCDeficitWeightedRoundRobinScheduler<ContextType, PriorityType>
+                    scheduler_;
+        ContextType context;
         while (true) {
             if (cancel_token->load(std::memory_order_relaxed)) {
                 break;
