@@ -103,14 +103,30 @@ private:
 };
 
 template <typename PriorityWeightType>
-struct LCPriorityWeights;
+struct LCPriorityWeights {
+    static constexpr size_t get_weight(LCTaskPriority priority) = 0;
+    static constexpr std::array<uint32_t, static_cast<size_t>(
+                                              LCTaskPriority::NUM_PRIORITIES)>
+        weights = {};
+};
 
 template <>
 struct LCPriorityWeights<LCTaskPriority> {
+    static constexpr std::array<uint32_t, static_cast<size_t>(
+                                              LCTaskPriority::NUM_PRIORITIES)>
+        weights = {10, 8, 5, 3, 5};
+
     static constexpr std::array<
         uint32_t, static_cast<size_t>(LCTaskPriority::NUM_PRIORITIES)>
     get_weights() {
-        return {10, 8, 5, 3, 1};
+        return weights;
+    }
+
+    static constexpr size_t get_weight(size_t priority) {
+        LC_ASSERT(
+            priority < static_cast<size_t>(LCTaskPriority::NUM_PRIORITIES),
+            "Invalid priority type");
+        return weights[priority];
     }
 };
 
@@ -137,37 +153,53 @@ public:
     // TODO maybe use WDRR
     bool try_schedule(LCMPMCMultiPriorityQueue<T, PriorityType> &queue,
                       T                                         &task) {
-        const size_t num_priorities =
+        static const size_t num_priorities =
             static_cast<size_t>(PriorityType::NUM_PRIORITIES);
-        for (size_t attempt = 0; attempt < num_priorities; ++attempt) {
-            size_t index = current_index_ % num_priorities;
+        for (size_t step = 0; step < num_priorities; ++step) {
+            size_t index = (current_index_ + step) % num_priorities;
+            weights_[index] +=
+                LCPriorityWeights<PriorityType>::get_weight(index);
             if (weights_[index] > 0) {
                 if (queue.dequeue(task, static_cast<PriorityType>(index))) {
-                    weights_[index]--;
-                    return true;
-                }
-            }
-            current_index_ = (current_index_ + 1) % num_priorities;
-        }
-        if (std::all_of(weights_.begin(), weights_.end(), [](uint32_t w) {
-            return w == 0;
-        })) {
-            reset_weights();
-        }
-
-        if (!queue.is_empty()) {
-            reset_weights();
-            for (size_t i = 0; i < num_priorities; ++i) {
-                if (queue.dequeue(task, static_cast<PriorityType>(i))) {
-                    if (weights_[i] > 0) {
-                        weights_[i]--;
-                    }
-                    current_index_ = (i + 1) % num_priorities;
-                    return true;
+                    --weights_[index];
+                    current_index_ = (index + 1) % num_priorities;
+                    return true;  // Successfully scheduled
                 }
             }
         }
         return false;
+
+        // const size_t num_priorities =
+        //     static_cast<size_t>(PriorityType::NUM_PRIORITIES);
+        // for (size_t attempt = 0; attempt < num_priorities; ++attempt) {
+        //     size_t index = current_index_ % num_priorities;
+        //     if (weights_[index] > 0) {
+        //         if (queue.dequeue(task, static_cast<PriorityType>(index))) {
+        //             weights_[index]--;
+        //             return true;
+        //         }
+        //     }
+        //     current_index_ = (current_index_ + 1) % num_priorities;
+        // }
+        // if (std::all_of(weights_.begin(), weights_.end(), [](uint32_t w) {
+        //     return w == 0;
+        // })) {
+        //     reset_weights();
+        // }
+
+        // if (!queue.is_empty()) {
+        //     reset_weights();
+        //     for (size_t i = 0; i < num_priorities; ++i) {
+        //         if (queue.dequeue(task, static_cast<PriorityType>(i))) {
+        //             if (weights_[i] > 0) {
+        //                 weights_[i]--;
+        //             }
+        //             current_index_ = (i + 1) % num_priorities;
+        //             return true;
+        //         }
+        //     }
+        // }
+        // return false;
     }
 
     bool drain_once(LCMPMCMultiPriorityQueue<T, PriorityType> &queue, T &task) {
