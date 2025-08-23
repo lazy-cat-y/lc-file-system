@@ -3,6 +3,9 @@
 #ifndef LC_EXCEPTION_H
 #define LC_EXCEPTION_H
 
+#include <cstdarg>
+#include <cstdio>
+#include <ctime>
 #include <exception>
 #include <iostream>
 #include <new>
@@ -90,9 +93,17 @@ private:
 };
 
 /// ----------- Exception executor ------------
-LC_NORETURN inline void fatal_exception(const std::exception &e) {
-    // TODO log to a file or console
-    std::cerr << "Fatal error: " << e.what() << std::endl;
+LC_NORETURN inline void fatal_exception(const char *fmt, ...) {
+    std::time_t t = std::time(nullptr);
+    char        buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", std::localtime(&t));
+
+    va_list args;
+    va_start(args, fmt);
+    fprintf(stderr, "[%s] Fatal error: ", buf);
+    vfprintf(stderr, fmt, args);
+    fprintf(stderr, "\n");
+    va_end(args);
     std::terminate();
 }
 

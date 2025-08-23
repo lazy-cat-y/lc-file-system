@@ -169,7 +169,7 @@ public:
             }
         } catch (const BadAllocError &e) {
             // print error and panic
-            fatal_exception(e);
+            fatal_exception(e.what());
         }
         size_.store(0, std::memory_order_relaxed);
     }

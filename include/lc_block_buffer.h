@@ -181,7 +181,7 @@ class BlockBufferPool {
     };
 
     enum class FrameAcquireResult {
-        ReadThreadPoolClose,
+        ThreadPoolClose,
         TaskCancelled,
         Success,
         UnknownError,
@@ -288,7 +288,7 @@ public:
             size_t             frame_index = LC_BLOCK_ILLEGAL_ID;
             FrameAcquireResult result =
                 acquire_frame(block_id, priority, cancel_token, frame_index);
-            if (result == FrameAcquireResult::ReadThreadPoolClose ||
+            if (result == FrameAcquireResult::ThreadPoolClose ||
                 result == FrameAcquireResult::TaskCancelled) {
                 return;  // Exit if the read thread pool is closed
             } else if (result == FrameAcquireResult::UnknownError) {
@@ -331,7 +331,7 @@ public:
             size_t             frame_index = LC_BLOCK_ILLEGAL_ID;
             FrameAcquireResult result =
                 acquire_frame(block_id, priority, cancel_token, frame_index);
-            if (result == FrameAcquireResult::ReadThreadPoolClose ||
+            if (result == FrameAcquireResult::ThreadPoolClose ||
                 result == FrameAcquireResult::TaskCancelled) {
                 return;  // Exit if the read thread pool is closed
             } else if (result == FrameAcquireResult::UnknownError) {
@@ -372,7 +372,7 @@ public:
             size_t             frame_index = LC_BLOCK_ILLEGAL_ID;
             FrameAcquireResult result =
                 acquire_frame(block_id, priority, cancel_token, frame_index);
-            if (result == FrameAcquireResult::ReadThreadPoolClose ||
+            if (result == FrameAcquireResult::ThreadPoolClose ||
                 result == FrameAcquireResult::TaskCancelled) {
                 return;  // Exit if the read thread pool is closed
             } else if (result == FrameAcquireResult::UnknownError) {
@@ -477,7 +477,7 @@ public:
         frame_index = LC_BLOCK_ILLEGAL_ID;
         FrameAcquireResult result =
             acquire_frame(block_id, priority, cancel_token, frame_index);
-        if (result == FrameAcquireResult::ReadThreadPoolClose ||
+        if (result == FrameAcquireResult::ThreadPoolClose ||
             result == FrameAcquireResult::TaskCancelled) {
             return;  // Exit if the read thread pool is closed
         } else if (result == FrameAcquireResult::UnknownError) {
@@ -590,7 +590,7 @@ private:
                             return FrameAcquireResult::TaskCancelled;
                         case TaskSubmitResult::ThreadPoolClose :
                             // Thread pool is closed
-                            return FrameAcquireResult::ReadThreadPoolClose;
+                            return FrameAcquireResult::ThreadPoolClose;
                         case TaskSubmitResult::UnknownError :
                         default                             : return FrameAcquireResult::UnknownError;
                     }
@@ -642,7 +642,7 @@ private:
                     return FrameAcquireResult::TaskCancelled;
                 case TaskSubmitResult::ThreadPoolClose :
                     // Thread pool is closed
-                    return FrameAcquireResult::ReadThreadPoolClose;
+                    return FrameAcquireResult::ThreadPoolClose;
                 case TaskSubmitResult::UnknownError :
                 default                             : return FrameAcquireResult::UnknownError;
             }
