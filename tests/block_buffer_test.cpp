@@ -20,7 +20,7 @@ public:
     static void SetUpTestSuite() {
         init_test_img_dir();
         test_img_path = get_test_img("block_buffer_mt_test.img");
-        lc_format_image(test_img_path, 512ull * 1024 * 1024);
+        format_image(test_img_path, 512ull * 1024 * 1024);
     }
 
     static void TearDownTestSuite() {
@@ -29,13 +29,13 @@ public:
 
 protected:
     inline static std::string      test_img_path;
-    std::unique_ptr<LCBlockDevice> block_device;
-    std::unique_ptr<LCSuperBlock>  super_block;
+    std::unique_ptr<BlockDevice> block_device;
+    std::unique_ptr<SuperBlock>  super_block;
 
     void SetUp() override {
-        block_device = std::make_unique<LCBlockDevice>(test_img_path);
+        block_device = std::make_unique<BlockDevice>(test_img_path);
         super_block =
-            std::make_unique<LCSuperBlock>(block_device->get_super_block());
+            std::make_unique<SuperBlock>(block_device->get_super_block());
     }
 
     void TearDown() override {}
@@ -48,15 +48,15 @@ TEST_F(LCBlockBufferMultithreadTest, ConcurrentWriteDifferentBlocks) {
     constexpr uint32_t thread_pool_size      = 16;
 
     auto write_thread_pool =
-        std::make_shared<LCThreadPool<LCTaskPriority>>("write_pool",
+        std::make_shared<ThreadPool<LCTaskPriority>>("write_pool",
                                                        thread_pool_size);
     auto read_thread_pool =
-        std::make_shared<LCThreadPool<LCTaskPriority>>("read_pool",
+        std::make_shared<ThreadPool<LCTaskPriority>>("read_pool",
                                                        thread_pool_size);
 
-    LCBlockBufferPool buffer_pool(
-        std::shared_ptr<LCBlockDevice>(block_device.get(),
-                                       [](LCBlockDevice *) {}),
+    BlockBufferPool buffer_pool(
+        std::shared_ptr<BlockDevice>(block_device.get(),
+                                       [](BlockDevice *) {}),
         pool_size,
         write_thread_pool,
         read_thread_pool);
@@ -69,7 +69,7 @@ TEST_F(LCBlockBufferMultithreadTest, ConcurrentWriteDifferentBlocks) {
                 uint32_t block_id = super_block->data_start +
                                     t * num_blocks_per_thread +
                                     i;  // <-- include i
-                LCBlock block {};
+                Block block {};
                 std::memset(block.data,
                             static_cast<uint8_t>(block_id & 0xFF),
                             DEFAULT_BLOCK_SIZE);
@@ -96,7 +96,7 @@ TEST_F(LCBlockBufferMultithreadTest, ConcurrentWriteDifferentBlocks) {
     uint32_t last =
         first + num_threads * num_blocks_per_thread;  // exclusive end
     for (uint32_t block_id = first; block_id < last; ++block_id) {
-        LCBlock result {};
+        Block result {};
         block_device->read_block(block_id, result);
         for (uint32_t j = 0; j < DEFAULT_BLOCK_SIZE; ++j) {
             ASSERT_EQ(result.data[j], static_cast<uint8_t>(block_id & 0xFF))
@@ -111,13 +111,13 @@ TEST_F(LCBlockBufferMultithreadTest, ConcurrentReadWriteSameBlocks) {
         super_block->data_start + 123;  // ensure inside data area
 
     auto write_thread_pool =
-        std::make_shared<LCThreadPool<LCTaskPriority>>("write_pool", 8);
+        std::make_shared<ThreadPool<LCTaskPriority>>("write_pool", 8);
     auto read_thread_pool =
-        std::make_shared<LCThreadPool<LCTaskPriority>>("read_pool", 8);
+        std::make_shared<ThreadPool<LCTaskPriority>>("read_pool", 8);
 
-    LCBlockBufferPool buffer_pool(
-        std::shared_ptr<LCBlockDevice>(block_device.get(),
-                                       [](LCBlockDevice *) {}),
+    BlockBufferPool buffer_pool(
+        std::shared_ptr<BlockDevice>(block_device.get(),
+                                       [](BlockDevice *) {}),
         pool_size,
         write_thread_pool,
         read_thread_pool);
@@ -126,7 +126,7 @@ TEST_F(LCBlockBufferMultithreadTest, ConcurrentReadWriteSameBlocks) {
     std::vector<std::thread> threads;
     for (int t = 0; t < 8; ++t) {
         threads.emplace_back([&]() {
-            LCBlock block {};
+            Block block {};
             std::memset(block.data, 88, DEFAULT_BLOCK_SIZE);
             for (int i = 1; i < 51; ++i) {
                 buffer_pool.write_block(block_id,
@@ -135,7 +135,7 @@ TEST_F(LCBlockBufferMultithreadTest, ConcurrentReadWriteSameBlocks) {
                                         block.data,
                                         DEFAULT_BLOCK_SIZE);
 
-                LCBlock tmp {};
+                Block tmp {};
                 buffer_pool.read_block(block_id,
                                        LCTaskPriority::High,
                                        nullptr,
@@ -156,7 +156,7 @@ TEST_F(LCBlockBufferMultithreadTest, ConcurrentReadWriteSameBlocks) {
     read_thread_pool->shutdown();
     write_thread_pool->shutdown();
 
-    LCBlock result {};
+    Block result {};
     block_device->read_block(block_id, result);
     for (uint32_t j = 0; j < DEFAULT_BLOCK_SIZE; ++j) {
         ASSERT_EQ(result.data[j], 88);
@@ -167,13 +167,13 @@ TEST_F(LCBlockBufferMultithreadTest, MixedConcurrentOps) {
     constexpr uint32_t pool_size = 64;
 
     auto write_thread_pool =
-        std::make_shared<LCThreadPool<LCTaskPriority>>("write_pool", 32);
+        std::make_shared<ThreadPool<LCTaskPriority>>("write_pool", 32);
     auto read_thread_pool =
-        std::make_shared<LCThreadPool<LCTaskPriority>>("read_pool", 32);
+        std::make_shared<ThreadPool<LCTaskPriority>>("read_pool", 32);
 
-    LCBlockBufferPool buffer_pool(
-        std::shared_ptr<LCBlockDevice>(block_device.get(),
-                                       [](LCBlockDevice *) {}),
+    BlockBufferPool buffer_pool(
+        std::shared_ptr<BlockDevice>(block_device.get(),
+                                       [](BlockDevice *) {}),
         pool_size,
         write_thread_pool,
         read_thread_pool);
@@ -187,7 +187,7 @@ TEST_F(LCBlockBufferMultithreadTest, MixedConcurrentOps) {
                 uint32_t offset   = (t * 31u + i) % 128u;
                 uint32_t block_id = super_block->data_start + offset;
 
-                LCBlock block {};
+                Block block {};
                 std::memset(block.data,
                             static_cast<int>(block_id & 0xFF),
                             DEFAULT_BLOCK_SIZE);
@@ -198,7 +198,7 @@ TEST_F(LCBlockBufferMultithreadTest, MixedConcurrentOps) {
                                         block.data,
                                         DEFAULT_BLOCK_SIZE);
 
-                LCBlock tmp {};
+                Block tmp {};
                 buffer_pool.read_block(block_id,
                                        LCTaskPriority::Normal,
                                        nullptr,

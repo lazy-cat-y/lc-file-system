@@ -24,15 +24,15 @@ static uint64_t get_file_size(const std::string &file_path) {
     return file_stat.st_size;
 }
 
-class LCBlockDevice {
+class BlockDevice {
 public:
-    LCBlockDevice()                                 = delete;
-    LCBlockDevice(const LCBlockDevice &)            = delete;
-    LCBlockDevice &operator=(const LCBlockDevice &) = delete;
-    LCBlockDevice(LCBlockDevice &&)                 = delete;
-    LCBlockDevice &operator=(LCBlockDevice &&)      = delete;
+    BlockDevice()                                 = delete;
+    BlockDevice(const BlockDevice &)            = delete;
+    BlockDevice &operator=(const BlockDevice &) = delete;
+    BlockDevice(BlockDevice &&)                 = delete;
+    BlockDevice &operator=(BlockDevice &&)      = delete;
 
-    explicit LCBlockDevice(const std::string &img_path) {
+    explicit BlockDevice(const std::string &img_path) {
         LC_ASSERT(!(get_file_size(img_path) & 0xFFF),
                   "Image size must be a multiple of block size");
 
@@ -42,11 +42,11 @@ public:
         }
 
         // 读取 superblock（block 0）
-        LCBlock header_block {};
+        Block header_block {};
         ssize_t n = ::pread(fd_, header_block.data, DEFAULT_BLOCK_SIZE, 0);
         LC_ASSERT(n == DEFAULT_BLOCK_SIZE, "pread superblock failed");
 
-        auto *header = reinterpret_cast<LCSuperBlock *>(header_block.data);
+        auto *header = reinterpret_cast<SuperBlock *>(header_block.data);
         if (header->magic != BLOCK_MAGIC_NUMBER) {
             throw ImgMagicError("Invalid magic: " + img_path);
         }
@@ -59,24 +59,24 @@ public:
         header_ = *header;
     }
 
-    ~LCBlockDevice() {
+    ~BlockDevice() {
         if (fd_ != -1) {
             ::close(fd_);
         }
     }
 
-    const LCSuperBlock &get_super_block() const {
+    const SuperBlock &get_super_block() const {
         return header_;
     }
 
-    void read_block(uint32_t block_id, LCBlock &block) const {
+    void read_block(uint32_t block_id, Block &block) const {
         check_range(block_id, "read");
         off_t   off = static_cast<off_t>(block_id) * DEFAULT_BLOCK_SIZE;
         ssize_t n   = ::pread(fd_, block.data, DEFAULT_BLOCK_SIZE, off);
         LC_ASSERT(n == DEFAULT_BLOCK_SIZE, "pread failed");
     }
 
-    void write_block(uint32_t block_id, const LCBlock &block) {
+    void write_block(uint32_t block_id, const Block &block) {
         check_range(block_id, "write");
         off_t   off = static_cast<off_t>(block_id) * DEFAULT_BLOCK_SIZE;
         ssize_t n   = ::pwrite(fd_, block.data, DEFAULT_BLOCK_SIZE, off);
@@ -93,7 +93,7 @@ private:
     }
 
     int          fd_ {-1};
-    LCSuperBlock header_ {};
+    SuperBlock header_ {};
 };
 
 LC_FILESYSTEM_NAMESPACE_END

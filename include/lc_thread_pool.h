@@ -28,7 +28,7 @@ LC_NAMESPACE_BEGIN
 LC_FILESYSTEM_NAMESPACE_BEGIN
 
 template <typename PriorityType>
-struct LCThreadPoolContextMetaData {
+struct ThreadPoolContextMetaData {
     std::string  listener_id;
     std::string  trace_id;
     time_t       timestamp;
@@ -36,32 +36,32 @@ struct LCThreadPoolContextMetaData {
 };
 
 template <typename PriorityType>
-struct LCContext<LCThreadPoolContextMetaData<PriorityType>> {
+struct Context<ThreadPoolContextMetaData<PriorityType>> {
     static_assert(std::is_same<PriorityType, LCTaskPriority>::value,
                   "Invalid priority type, must be LCTaskPriority");
-    LCThreadPoolContextMetaData<PriorityType> metadata;
+    ThreadPoolContextMetaData<PriorityType> metadata;
     // std::bind(f, args...) or a lambda function
     // std::make_shared<LambdaTask<std::function<void()>>>(std::bind(&Foo::bar,
     // &foo));
     // std::make_shared<LambdaTask<decltype(real_lambda)>>(std::move(real_lambda));
-    std::shared_ptr<LCTask> task;
+    std::shared_ptr<Task> task;
 
-    LCContext() = default;
+    Context() = default;
 
-    LCContext(const LCThreadPoolContextMetaData<PriorityType> &meta,
-              std::shared_ptr<LCTask>                          data) :
+    Context(const ThreadPoolContextMetaData<PriorityType> &meta,
+              std::shared_ptr<Task>                          data) :
         metadata(meta),
         task(std::move(data)) {}
 
-    LCContext(const LCContext &)            = delete;
-    LCContext &operator=(const LCContext &) = delete;
+    Context(const Context &)            = delete;
+    Context &operator=(const Context &) = delete;
 
-    LCContext(LCContext &&other) {
+    Context(Context &&other) {
         metadata = std::move(other.metadata);
         task     = std::move(other.task);
     }
 
-    LCContext &operator=(LCContext &&other) {
+    Context &operator=(Context &&other) {
         if (this != &other) {
             metadata = std::move(other.metadata);
             task     = std::move(other.task);
@@ -75,21 +75,21 @@ struct LCContext<LCThreadPoolContextMetaData<PriorityType>> {
 };
 
 template <typename PriorityType>
-class LCTreadPoolContextFactory {
-    using MetadataType = LCThreadPoolContextMetaData<PriorityType>;
-    using ContextType  = LCContext<MetadataType>;
+class TreadPoolContextFactory {
+    using MetadataType = ThreadPoolContextMetaData<PriorityType>;
+    using ContextType  = Context<MetadataType>;
 public:
 
-    LCTreadPoolContextFactory() = delete;
+    TreadPoolContextFactory() = delete;
 
-    LCTreadPoolContextFactory(const LCTreadPoolContextFactory &) = delete;
-    LCTreadPoolContextFactory &operator=(const LCTreadPoolContextFactory &) =
+    TreadPoolContextFactory(const TreadPoolContextFactory &) = delete;
+    TreadPoolContextFactory &operator=(const TreadPoolContextFactory &) =
         delete;
-    LCTreadPoolContextFactory(LCTreadPoolContextFactory &&)            = delete;
-    LCTreadPoolContextFactory &operator=(LCTreadPoolContextFactory &&) = delete;
+    TreadPoolContextFactory(TreadPoolContextFactory &&)            = delete;
+    TreadPoolContextFactory &operator=(TreadPoolContextFactory &&) = delete;
 
-    LCTreadPoolContextFactory(const MetadataType     &metadata,
-                              std::shared_ptr<LCTask> task) :
+    TreadPoolContextFactory(const MetadataType     &metadata,
+                              std::shared_ptr<Task> task) :
         metadata_(metadata),
         task_(std::move(task)) {}
 
@@ -99,7 +99,7 @@ public:
 
 private:
     MetadataType            metadata_;
-    std::shared_ptr<LCTask> task_;
+    std::shared_ptr<Task> task_;
 };
 
 template <typename PriorityWeightType>
@@ -131,23 +131,23 @@ struct LCPriorityWeights<LCTaskPriority> {
 };
 
 template <typename T, typename PriorityType>
-class LCWeightedRoundRobinScheduler {
+class WeightedRoundRobinScheduler {
     static_assert(std::is_same<PriorityType, LCTaskPriority>::value,
                   "Invalid priority type, must be LCTaskPriority");
 public:
 
-    LCWeightedRoundRobinScheduler() {
+    WeightedRoundRobinScheduler() {
         reset_weights();
     }
 
-    ~LCWeightedRoundRobinScheduler() = default;
+    ~WeightedRoundRobinScheduler() = default;
 
-    LCWeightedRoundRobinScheduler(const LCWeightedRoundRobinScheduler &) =
+    WeightedRoundRobinScheduler(const WeightedRoundRobinScheduler &) =
         delete;
-    LCWeightedRoundRobinScheduler &operator=(
-        const LCWeightedRoundRobinScheduler &)                      = delete;
-    LCWeightedRoundRobinScheduler(LCWeightedRoundRobinScheduler &&) = delete;
-    LCWeightedRoundRobinScheduler &operator=(LCWeightedRoundRobinScheduler &&) =
+    WeightedRoundRobinScheduler &operator=(
+        const WeightedRoundRobinScheduler &)                      = delete;
+    WeightedRoundRobinScheduler(WeightedRoundRobinScheduler &&) = delete;
+    WeightedRoundRobinScheduler &operator=(WeightedRoundRobinScheduler &&) =
         delete;
 
     bool try_schedule(LCMPMCMultiPriorityQueue<T, PriorityType> &queue,
@@ -210,25 +210,25 @@ private:
 };
 
 template <typename T, typename PriorityType>
-class LCDeficitWeightedRoundRobinScheduler {
+class DeficitWeightedRoundRobinScheduler {
     static_assert(std::is_same<PriorityType, LCTaskPriority>::value,
                   "Invalid priority type, must be LCTaskPriority");
 public:
 
-    LCDeficitWeightedRoundRobinScheduler() {
+    DeficitWeightedRoundRobinScheduler() {
         reset_weights();
     }
 
-    ~LCDeficitWeightedRoundRobinScheduler() = default;
+    ~DeficitWeightedRoundRobinScheduler() = default;
 
-    LCDeficitWeightedRoundRobinScheduler(
-        const LCDeficitWeightedRoundRobinScheduler &) = delete;
-    LCDeficitWeightedRoundRobinScheduler &operator=(
-        const LCDeficitWeightedRoundRobinScheduler &) = delete;
-    LCDeficitWeightedRoundRobinScheduler(
-        LCDeficitWeightedRoundRobinScheduler &&) = delete;
-    LCDeficitWeightedRoundRobinScheduler &operator=(
-        LCDeficitWeightedRoundRobinScheduler &&) = delete;
+    DeficitWeightedRoundRobinScheduler(
+        const DeficitWeightedRoundRobinScheduler &) = delete;
+    DeficitWeightedRoundRobinScheduler &operator=(
+        const DeficitWeightedRoundRobinScheduler &) = delete;
+    DeficitWeightedRoundRobinScheduler(
+        DeficitWeightedRoundRobinScheduler &&) = delete;
+    DeficitWeightedRoundRobinScheduler &operator=(
+        DeficitWeightedRoundRobinScheduler &&) = delete;
 
     bool try_schedule(LCMPMCMultiPriorityQueue<T, PriorityType> &queue,
                       T                                         &task) {
@@ -282,21 +282,21 @@ inline void safe_launch_function(std::function<void()> func) {
 }
 
 template <class PriorityType>
-class LCThreadPool {
-    using ContextType = LCContext<LCThreadPoolContextMetaData<PriorityType>>;
+class ThreadPool {
+    using ContextType = Context<ThreadPoolContextMetaData<PriorityType>>;
     using TimePoint   = std::atomic<std::chrono::steady_clock::time_point>;
     static_assert(std::is_same<PriorityType, LCTaskPriority>::value,
                   "Invalid priority type, must be LCTaskPriority");
 public:
 
-    LCThreadPool() = delete;
+    ThreadPool() = delete;
 
-    LCThreadPool(const LCThreadPool &)            = delete;
-    LCThreadPool &operator=(const LCThreadPool &) = delete;
-    LCThreadPool(LCThreadPool &&)                 = delete;
-    LCThreadPool &operator=(LCThreadPool &&)      = delete;
+    ThreadPool(const ThreadPool &)            = delete;
+    ThreadPool &operator=(const ThreadPool &) = delete;
+    ThreadPool(ThreadPool &&)                 = delete;
+    ThreadPool &operator=(ThreadPool &&)      = delete;
 
-    LC_EXPLICIT LCThreadPool(const std::string &name,
+    LC_EXPLICIT ThreadPool(const std::string &name,
                              std::size_t        thread_count) :
         name_(std::move(name)),
         thread_count_(thread_count) {
@@ -317,7 +317,7 @@ public:
         }
     }
 
-    ~LCThreadPool() {
+    ~ThreadPool() {
         shutdown();
     }
 
@@ -337,7 +337,7 @@ public:
     }
 
     bool wait_and_submit_task(
-        LCTreadPoolContextFactory<PriorityType> &factory) {
+        TreadPoolContextFactory<PriorityType> &factory) {
         while (true) {
             if (is_stopped()) {
                 return false;  // Cannot submit tasks when stopped
@@ -433,7 +433,7 @@ private:
     void worker_pool(const std::string &thread_name, size_t thread_index,
                      std::shared_ptr<std::atomic<bool>> cancel_token) {
         // Run the thread's main loop
-        LCDeficitWeightedRoundRobinScheduler<ContextType, PriorityType>
+        DeficitWeightedRoundRobinScheduler<ContextType, PriorityType>
                     scheduler_;
         ContextType context;
         while (true) {

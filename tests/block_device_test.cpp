@@ -14,7 +14,7 @@ using namespace lc::fs;
 class LCBlockDeviceTest : public ::testing::Test {
 protected:
     std::string  test_img_path = get_test_img("block_device_test.img");
-    LCSuperBlock expected_header {
+    SuperBlock expected_header {
         .magic              = BLOCK_MAGIC_NUMBER,
         .block_size         = DEFAULT_BLOCK_SIZE,
         .total_blocks       = 262144,  // 1 GiB
@@ -29,7 +29,7 @@ protected:
 
     void SetUp() override {
         init_test_img_dir();
-        lc_format_image(test_img_path, 1024ull * 1024 * 1024);  // 1 GiB
+        format_image(test_img_path, 1024ull * 1024 * 1024);  // 1 GiB
     }
 
     void TearDown() override {
@@ -38,8 +38,8 @@ protected:
 };
 
 TEST_F(LCBlockDeviceTest, SuperBlockInitialization) {
-    LCBlockDevice device(test_img_path);
-    LCSuperBlock  header = device.get_super_block();
+    BlockDevice device(test_img_path);
+    SuperBlock  header = device.get_super_block();
 
     EXPECT_EQ(header.magic, expected_header.magic);
     EXPECT_EQ(header.block_size, expected_header.block_size);
@@ -54,8 +54,8 @@ TEST_F(LCBlockDeviceTest, SuperBlockInitialization) {
 
 // TEST inode initialization
 TEST_F(LCBlockDeviceTest, InodeInitialization) {
-    LCBlockDevice device(test_img_path);
-    LCBlock       inode_block {};
+    BlockDevice device(test_img_path);
+    Block       inode_block {};
     block_clear(&inode_block);
     device.read_block(device.get_super_block().inode_block_start,
                       inode_block);  // Read the first block (superblock)
@@ -72,10 +72,10 @@ TEST_F(LCBlockDeviceTest, InodeInitialization) {
 }
 
 TEST_F(LCBlockDeviceTest, BlockReadWriteRoundtrip) {
-    LCBlockDevice      device(test_img_path);
+    BlockDevice      device(test_img_path);
     constexpr uint32_t test_block_id = 8;
 
-    LCBlock write_block;
+    Block write_block;
     block_clear(&write_block);
 
     // Write a pattern to block
@@ -87,7 +87,7 @@ TEST_F(LCBlockDeviceTest, BlockReadWriteRoundtrip) {
     device.write_block(test_block_id, write_block);
 
     // Read back and compare
-    LCBlock read_block;
+    Block read_block;
     block_clear(&read_block);
 
     device.read_block(test_block_id, read_block);

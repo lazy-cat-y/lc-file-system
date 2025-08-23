@@ -30,7 +30,7 @@ public:
     LCBlockManager &operator=(LCBlockManager &&)      = delete;
 
     LC_EXPLICIT LCBlockManager(LCBlockBufferPool  *block_buffer_pool,
-                               const LCSuperBlock *super_block) :
+                               const SuperBlock *super_block) :
         block_buffer_pool_(block_buffer_pool),
         super_block_(super_block) {
         LC_ASSERT(block_buffer_pool_ != nullptr,
@@ -43,7 +43,7 @@ public:
                                 super_block->data_start);
     }
 
-    void read_block(uint32_t block_id, LCBlock &block) {
+    void read_block(uint32_t block_id, Block &block) {
         LC_ASSERT(block_id < super_block_->total_blocks, "Invalid block ID");
 
 #if defined(DEBUG)
@@ -208,7 +208,7 @@ public:
 private:
 
     LCBlockBufferPool  *block_buffer_pool_;
-    const LCSuperBlock *super_block_;
+    const SuperBlock *super_block_;
     uint32_t            block_bitmap_size_;
     LCBitmapIndex       data_start_index_;
 };

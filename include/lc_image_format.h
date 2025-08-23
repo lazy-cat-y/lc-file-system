@@ -13,25 +13,25 @@ LC_FILESYSTEM_NAMESPACE_BEGIN
 
 // write into the block bitmap.
 
-void lc_format_image(const std::string &img_path,
+void format_image(const std::string &img_path,
                      const uint64_t     total_size_bytes);
 
-std::ofstream lc_create_empty_image(const std::string &img_path,
+std::ofstream create_empty_image(const std::string &img_path,
                                     const uint64_t     total_size_bytes);
 
-void lc_ensure_parent_directory_exists(const std::string &img_path);
+void ensure_parent_directory_exists(const std::string &img_path);
 
-void lc_initialize_super_block(const uint64_t total_size_bytes,
-                               LCSuperBlock  &header);
+void initialize_super_block(const uint64_t total_size_bytes,
+                               SuperBlock  &header);
 
-void lc_write_super_block(std::ofstream &img_file, const LCSuperBlock &header);
+void write_super_block(std::ofstream &img_file, const SuperBlock &header);
 
-void lc_clear_image(std::ofstream &img_file, const uint32_t total_blocks);
+void clear_image(std::ofstream &img_file, const uint32_t total_blocks);
 
-void lc_initialize_inodes(std::ofstream &img_file, const LCSuperBlock &header);
+void initialize_inodes(std::ofstream &img_file, const SuperBlock &header);
 
-void lc_initialize_block_bitmap(std::ofstream      &img_file,
-                                const LCSuperBlock &header);
+void initialize_block_bitmap(std::ofstream      &img_file,
+                                const SuperBlock &header);
 
 LC_FILESYSTEM_NAMESPACE_END
 LC_NAMESPACE_END

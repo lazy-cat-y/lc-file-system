@@ -62,22 +62,22 @@ public:
 };
 
 // ----------- File Operation Errors -----------
-class LCInvalidFileLenError : public FileSystemError {
+class InvalidFileLenError : public FileSystemError {
 public:
-    LC_EXPLICIT LCInvalidFileLenError(uint64_t len) :
+    LC_EXPLICIT InvalidFileLenError(uint64_t len) :
         FileSystemError("Invalid file length: " + std::to_string(len)) {}
 };
 
-class LCFileExistsError : public FileSystemError {
+class FileExistsError : public FileSystemError {
 public:
-    LC_EXPLICIT LCFileExistsError(const std::string &filename) :
+    LC_EXPLICIT FileExistsError(const std::string &filename) :
         FileSystemError("File already exists: " + filename) {}
 };
 
 // ----------- Initialization System Errors -----------
-class LCBadAllocError : public std::bad_alloc {
+class BadAllocError : public std::bad_alloc {
 public:
-    LC_EXPLICIT LCBadAllocError(const std::string &message) :
+    LC_EXPLICIT BadAllocError(const std::string &message) :
         std::bad_alloc(),
         message_(message) {}
 
@@ -90,7 +90,7 @@ private:
 };
 
 /// ----------- Exception executor ------------
-LC_NORETURN inline void lc_fatal_exception(const std::exception &e) {
+LC_NORETURN inline void fatal_exception(const std::exception &e) {
     // TODO log to a file or console
     std::cerr << "Fatal error: " << e.what() << std::endl;
     std::terminate();

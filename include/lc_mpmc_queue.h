@@ -164,12 +164,12 @@ public:
                     static_cast<PriorityType>(i));
             });
             if (!queues_) {
-                throw LCBadAllocError(
+                throw BadAllocError(
                     "Failed to allocate multi-priority queue");
             }
-        } catch (const LCBadAllocError &e) {
+        } catch (const BadAllocError &e) {
             // print error and panic
-            lc_fatal_exception(e);
+            fatal_exception(e);
         }
         size_.store(0, std::memory_order_relaxed);
     }

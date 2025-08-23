@@ -11,22 +11,22 @@
 
 #define BLOCK_MAGIC_NUMBER 0xDEADBEEF
 
-typedef struct LCBlock {
+typedef struct Block {
     alignas(DEFAULT_BLOCK_SIZE)
         uint8_t data[DEFAULT_BLOCK_SIZE];  // Pointer to the block data
-} LCBlock;
+} Block;
 
-void block_clear(LCBlock *block);
+void block_clear(Block *block);
 
-void block_write(LCBlock *block, const void *data, size_t size,
+void block_write(Block *block, const void *data, size_t size,
                  size_t offset = 0);
 
-uint8_t *block_as(LCBlock *block);
+uint8_t *block_as(Block *block);
 
-const uint8_t *block_as_const(const LCBlock *block);
+const uint8_t *block_as_const(const Block *block);
 
 // block header is stored in the first block of the image
-struct LCSuperBlock {
+struct SuperBlock {
     uint32_t magic      = BLOCK_MAGIC_NUMBER;
     uint32_t block_size = DEFAULT_BLOCK_SIZE;
     uint32_t total_blocks;

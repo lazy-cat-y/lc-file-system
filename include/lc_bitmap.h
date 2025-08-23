@@ -2,6 +2,7 @@
 #define LC_BITMAP_H
 
 #include <cstdint>
+#include <memory>
 
 #include "lc_configs.h"
 #include "lc_utils.h"
@@ -9,14 +10,14 @@
 LC_NAMESPACE_BEGIN
 LC_FILESYSTEM_NAMESPACE_BEGIN
 
-typedef struct LCBitmapIndex {
+typedef struct BitmapIndex {
     uint32_t block_id;     // The ID of the block in the bitmap
     uint32_t byte_offset;  // The offset in the bitmap (in bytes)
-    uint32_t bit_offset;   // The bit offset in the block
-} LCBitmapIndex;
+    uint8_t  bit_offset;   // The bit offset in the block
+} BitmapIndex;
 
-inline LCBitmapIndex lc_cal_bitmap_index(uint32_t block_offset, uint32_t id) {
-    LCBitmapIndex index;
+inline BitmapIndex lc_cal_bitmap_index(uint32_t block_offset, uint32_t id) {
+    BitmapIndex index;
     index.block_id            = block_offset + id / LC_BITS_PER_BLOCK;
     uint32_t block_bit_offset = id % LC_BITS_PER_BLOCK;
     index.byte_offset         = block_bit_offset / 8;
@@ -25,8 +26,13 @@ inline LCBitmapIndex lc_cal_bitmap_index(uint32_t block_offset, uint32_t id) {
 }
 
 class LCBitmapCache {
-// TODO: Implement a bitmap cache for block manager and inode manager
-// FUTURE:
+    // TODO: Implement a bitmap cache for block manager and inode manager
+    // FUTURE:
+
+private:
+    std::unique_ptr<uint8_t[]> bitmap_;
+    uint32_t                   start_block_id_;
+    uint32_t                   block_count_;
 };
 
 LC_FILESYSTEM_NAMESPACE_END

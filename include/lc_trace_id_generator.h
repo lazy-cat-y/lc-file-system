@@ -11,7 +11,7 @@
 LC_NAMESPACE_BEGIN
 LC_FILESYSTEM_NAMESPACE_BEGIN
 
-enum class LCTraceTypeID {
+enum class TraceTypeID {
     WriteTask,
     FlushTask,
     BackgroundFlushTask,
@@ -23,12 +23,12 @@ enum class LCTraceTypeID {
     UnknownTask,
 };
 
-void __lc_generate_trace_type_name(LCTraceTypeID      type_id,
+void __generate_trace_type_name(TraceTypeID      type_id,
                                    std::stringstream &trace_name);
 
-void __lc_uuid_v4_generate(std::stringstream &uuid);
+void __uuid_v4_generate(std::stringstream &uuid);
 
-void lc_generate_trace_id(LCTraceTypeID type_id, std::string &trace_id);
+void generate_trace_id(TraceTypeID type_id, std::string &trace_id);
 
 LC_FILESYSTEM_NAMESPACE_END
 LC_NAMESPACE_END

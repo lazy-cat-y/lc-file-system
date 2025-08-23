@@ -25,11 +25,11 @@ protected:
 };
 
 TEST_F(LCThreadPoolTest, SubmitAndExecuteAllTasks) {
-    LCThreadPool<LCTaskPriority> pool("test_pool", kThreadCount);
+    ThreadPool<LCTaskPriority> pool("test_pool", kThreadCount);
 
     for (int i = 0; i < kNumTasks; ++i) {
         auto shared_state = state;
-        auto task = std::make_shared<LCLambdaTask<std::function<void()>>>(
+        auto task = std::make_shared<LambdaTask<std::function<void()>>>(
             [i, shared_state]() {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             std::lock_guard<std::mutex> lock(shared_state->mutex);
@@ -37,13 +37,13 @@ TEST_F(LCThreadPoolTest, SubmitAndExecuteAllTasks) {
             shared_state->counter.fetch_add(1, std::memory_order_relaxed);
         });
 
-        LCThreadPoolContextMetaData<LCTaskPriority> metadata {
+        ThreadPoolContextMetaData<LCTaskPriority> metadata {
             .listener_id = "test",
             .trace_id    = std::to_string(i),
             .timestamp   = std::time(nullptr),
             .priority    = LCTaskPriority::Normal};
 
-        LCTreadPoolContextFactory<LCTaskPriority> factory(metadata, task);
+        TreadPoolContextFactory<LCTaskPriority> factory(metadata, task);
 
         ASSERT_TRUE(pool.wait_and_submit_task(factory));
     }
@@ -57,19 +57,19 @@ TEST_F(LCThreadPoolTest, SubmitAndExecuteAllTasks) {
 }
 
 TEST_F(LCThreadPoolTest, ShutdownPreventsFurtherSubmission) {
-    LCThreadPool<LCTaskPriority> pool("test_shutdown", kThreadCount);
+    ThreadPool<LCTaskPriority> pool("test_shutdown", kThreadCount);
 
     pool.shutdown();
 
-    auto task = std::make_shared<LCLambdaTask<std::function<void()>>>([]() {});
+    auto task = std::make_shared<LambdaTask<std::function<void()>>>([]() {});
 
-    LCThreadPoolContextMetaData<LCTaskPriority> metadata {
+    ThreadPoolContextMetaData<LCTaskPriority> metadata {
         .listener_id = "test",
         .trace_id    = "shutdown_test",
         .timestamp   = std::time(nullptr),
         .priority    = LCTaskPriority::Normal};
 
-    LCTreadPoolContextFactory<LCTaskPriority> factory(metadata, task);
+    TreadPoolContextFactory<LCTaskPriority> factory(metadata, task);
 
     ASSERT_FALSE(pool.wait_and_submit_task(factory));
 }

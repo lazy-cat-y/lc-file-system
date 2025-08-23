@@ -5,16 +5,16 @@
 
 #include "lc_configs.h"
 
-struct LCTask {
+struct Task {
     virtual void run() = 0;
-    virtual ~LCTask()  = default;
+    virtual ~Task()  = default;
 };
 
 template <typename Fn>
-struct LCLambdaTask : LCTask {
+struct LambdaTask : Task {
     Fn fn;
 
-    LC_EXPLICIT LCLambdaTask(Fn &&f) : fn(std::move(f)) {}
+    LC_EXPLICIT LambdaTask(Fn &&f) : fn(std::move(f)) {}
 
     void run() override {
         fn();

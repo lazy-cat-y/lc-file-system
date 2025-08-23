@@ -10,9 +10,9 @@
 LC_NAMESPACE_BEGIN
 LC_FILESYSTEM_NAMESPACE_BEGIN
 
-class LCWaitStrategyBase {
+class WaitStrategyBase {
 public:
-    virtual ~LCWaitStrategyBase() = default;
+    virtual ~WaitStrategyBase() = default;
     virtual void wait()           = 0;  // Wait for a condition to be met
     virtual void wait_for(
         std::chrono::milliseconds
@@ -22,9 +22,9 @@ public:
     virtual void reset()      = 0;  // Reset the wait strategy, if applicable
 };
 
-class LCConditionVariableWaitStrategy : public LCWaitStrategyBase {
+class ConditionVariableWaitStrategy : public WaitStrategyBase {
 public:
-    LCConditionVariableWaitStrategy() : notified_(false) {}
+    ConditionVariableWaitStrategy() : notified_(false) {}
 
     void wait() override {
         std::unique_lock<std::mutex> lock(mtx_);

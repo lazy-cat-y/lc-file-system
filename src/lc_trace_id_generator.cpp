@@ -5,25 +5,25 @@
 #include "lc_configs.h"
 #include "lc_trace_id_generator.h"
 
-void lc::fs::__lc_generate_trace_type_name(LCTraceTypeID      type_id,
+void lc::fs::__generate_trace_type_name(TraceTypeID      type_id,
                                            std::stringstream &trace_name) {
     switch (type_id) {
-        case LCTraceTypeID::WriteTask : trace_name << "write_task"; break;
-        case LCTraceTypeID::FlushTask : trace_name << "flush_task"; break;
-        case LCTraceTypeID::BackgroundFlushTask :
+        case TraceTypeID::WriteTask : trace_name << "write_task"; break;
+        case TraceTypeID::FlushTask : trace_name << "flush_task"; break;
+        case TraceTypeID::BackgroundFlushTask :
             trace_name << "background_flush_task";
             break;
-        case LCTraceTypeID::ReadTask  : trace_name << "read_task"; break;
-        case LCTraceTypeID::BlockTask : trace_name << "block_task"; break;
-        case LCTraceTypeID::InodeTask : trace_name << "inode_task"; break;
-        case LCTraceTypeID::DirectoryTask :
+        case TraceTypeID::ReadTask  : trace_name << "read_task"; break;
+        case TraceTypeID::BlockTask : trace_name << "block_task"; break;
+        case TraceTypeID::InodeTask : trace_name << "inode_task"; break;
+        case TraceTypeID::DirectoryTask :
             trace_name << "directory_task";
             break;
         default : trace_name << "unknown_task";
     }
 }
 
-void lc::fs::__lc_uuid_v4_generate(std::stringstream &track_name) {
+void lc::fs::__uuid_v4_generate(std::stringstream &track_name) {
     std::random_device              rd;
     std::mt19937                    gen(rd());
     std::uniform_int_distribution<> dis(0, 15);
@@ -57,12 +57,12 @@ void lc::fs::__lc_uuid_v4_generate(std::stringstream &track_name) {
     }
 }
 
-void lc::fs::lc_generate_trace_id(LCTraceTypeID type_id,
+void lc::fs::generate_trace_id(TraceTypeID type_id,
                                   std::string  &trace_id) {
     LC_ASSERT(trace_id.empty(), "trace_id must be empty before generation");
     std::stringstream trace_name;
-    __lc_generate_trace_type_name(type_id, trace_name);
+    __generate_trace_type_name(type_id, trace_name);
     trace_name << "-";
-    __lc_uuid_v4_generate(trace_name);
+    __uuid_v4_generate(trace_name);
     trace_id = trace_name.str();
 }

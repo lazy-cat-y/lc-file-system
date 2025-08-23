@@ -7,7 +7,7 @@ LC_NAMESPACE_BEGIN
 LC_FILESYSTEM_NAMESPACE_BEGIN
 
 template <typename MetadataType>
-struct LCContext;
+struct Context;
 
 LC_FILESYSTEM_NAMESPACE_END
 LC_NAMESPACE_END

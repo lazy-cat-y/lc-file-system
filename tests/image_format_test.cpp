@@ -17,7 +17,7 @@ TEST(LCFormatImageTest, CreateAndVerifyImage) {
     uint64_t img_size = 16 * 1024 * 1024;  // 16MB
 
     // Step 1: Call format
-    lc_format_image(test_img_path, img_size);
+    format_image(test_img_path, img_size);
 
     // Step 2: Check file exists
     ASSERT_TRUE(std::filesystem::exists(test_img_path));
@@ -30,13 +30,13 @@ TEST(LCFormatImageTest, CreateAndVerifyImage) {
     std::ifstream img_file(test_img_path, std::ios::binary);
     ASSERT_TRUE(img_file.is_open());
 
-    LCBlock header_block {};
+    Block header_block {};
     img_file.seekg(0, std::ios::beg);
     img_file.read(reinterpret_cast<char *>(block_as(&header_block)),
                   DEFAULT_BLOCK_SIZE);
 
-    const LCSuperBlock *header =
-        reinterpret_cast<LCSuperBlock *>(block_as(&header_block));
+    const SuperBlock *header =
+        reinterpret_cast<SuperBlock *>(block_as(&header_block));
 
     EXPECT_EQ(header->total_blocks, img_size / DEFAULT_BLOCK_SIZE);
     EXPECT_GT(header->inode_count, 0u);

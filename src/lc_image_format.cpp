@@ -16,31 +16,31 @@
 LC_NAMESPACE_BEGIN
 LC_FILESYSTEM_NAMESPACE_BEGIN
 
-void lc_format_image(const std::string &img_path,
+void format_image(const std::string &img_path,
                      const uint64_t     total_size_bytes) {
     LC_ASSERT(!(total_size_bytes & 0xFFF),
               "Total size must be a multiple of block size");
 
     // create file if not exists
-    std::ofstream img_file = lc_create_empty_image(img_path, total_size_bytes);
+    std::ofstream img_file = create_empty_image(img_path, total_size_bytes);
 
     // initialize the block header(super block)
-    LCSuperBlock header {};
-    lc_initialize_super_block(total_size_bytes, header);
+    SuperBlock header {};
+    initialize_super_block(total_size_bytes, header);
 
     // clear the image
-    lc_clear_image(img_file, header.total_blocks);
+    clear_image(img_file, header.total_blocks);
 
     // write the super block to the first block
-    lc_write_super_block(img_file, header);
+    write_super_block(img_file, header);
 
     // initialize all inodes
-    lc_initialize_inodes(img_file, header);
+    initialize_inodes(img_file, header);
 
-    lc_initialize_block_bitmap(img_file, header);
+    initialize_block_bitmap(img_file, header);
 }
 
-void lc_ensure_parent_directory_exists(const std::string &img_path) {
+void ensure_parent_directory_exists(const std::string &img_path) {
     std::filesystem::path path(img_path);
     std::filesystem::path parent_dir = path.parent_path();
 
@@ -49,11 +49,11 @@ void lc_ensure_parent_directory_exists(const std::string &img_path) {
     }
 }
 
-std::ofstream lc_create_empty_image(const std::string &img_path,
+std::ofstream create_empty_image(const std::string &img_path,
                                     const uint64_t     total_size_bytes) {
     namespace fs = std::filesystem;
 
-    lc_ensure_parent_directory_exists(img_path);
+    ensure_parent_directory_exists(img_path);
 
     if (fs::exists(img_path)) {
         fs::remove(img_path);
@@ -67,23 +67,23 @@ std::ofstream lc_create_empty_image(const std::string &img_path,
     return img_file;
 }
 
-void lc_initialize_super_block(const uint64_t total_size_bytes,
-                               LCSuperBlock  &header) {
+void initialize_super_block(const uint64_t total_size_bytes,
+                               SuperBlock  &header) {
     LC_CONSTEXPR uint32_t bytes_per_inode = 16 * 1024;  // 16 KiB per inode
     uint32_t              total_blocks =
         static_cast<uint32_t>(total_size_bytes / DEFAULT_BLOCK_SIZE);
 
-    uint32_t block_bitmap_size = lc_ceil_divide_int32_t(total_blocks, 8);  // 1
+    uint32_t block_bitmap_size = ceil_divide_int32_t(total_blocks, 8);  // 1
     uint32_t block_bitmap_block_count =
-        lc_ceil_divide_int32_t(block_bitmap_size, DEFAULT_BLOCK_SIZE);
+        ceil_divide_int32_t(block_bitmap_size, DEFAULT_BLOCK_SIZE);
 
     uint32_t inode_count =
         static_cast<uint32_t>(total_size_bytes / bytes_per_inode);
     uint32_t inode_block_count =
-        lc_ceil_divide_int32_t(inode_count, LC_INODES_PRE_BLOCK);
-    uint32_t inode_bitmap_size = lc_ceil_divide_int32_t(inode_count, 8);
+        ceil_divide_int32_t(inode_count, LC_INODES_PRE_BLOCK);
+    uint32_t inode_bitmap_size = ceil_divide_int32_t(inode_count, 8);
     uint32_t inode_bitmap_block_count =
-        lc_ceil_divide_int32_t(inode_bitmap_size, DEFAULT_BLOCK_SIZE);
+        ceil_divide_int32_t(inode_bitmap_size, DEFAULT_BLOCK_SIZE);
 
     header.total_blocks       = total_blocks;
     header.inode_count        = inode_count;
@@ -96,18 +96,18 @@ void lc_initialize_super_block(const uint64_t total_size_bytes,
     header.data_start        = header.inode_block_start + inode_block_count;
 }
 
-void lc_write_super_block(std::ofstream &img_file, const LCSuperBlock &header) {
-    LCBlock header_block {};
+void write_super_block(std::ofstream &img_file, const SuperBlock &header) {
+    Block header_block {};
     block_clear(&header_block);
-    block_write(&header_block, &header, sizeof(LCSuperBlock), 0);
+    block_write(&header_block, &header, sizeof(SuperBlock), 0);
     img_file.seekp(0);
 
     img_file.write(reinterpret_cast<char *>(block_as(&header_block)),
                    DEFAULT_BLOCK_SIZE);
 }
 
-void lc_clear_image(std::ofstream &img_file, const uint32_t total_blocks) {
-    LCBlock zero_block {};
+void clear_image(std::ofstream &img_file, const uint32_t total_blocks) {
+    Block zero_block {};
     block_clear(&zero_block);
     for (uint32_t i = 0; i < total_blocks; ++i) {
         img_file.write(reinterpret_cast<char *>(block_as(&zero_block)),
@@ -115,10 +115,10 @@ void lc_clear_image(std::ofstream &img_file, const uint32_t total_blocks) {
     }
 }
 
-void lc_initialize_inodes(std::ofstream &img_file, const LCSuperBlock &header) {
+void initialize_inodes(std::ofstream &img_file, const SuperBlock &header) {
     LCInode inode {};
     inode_clear(&inode);
-    LCBlock inode_block {};
+    Block inode_block {};
     block_clear(&inode_block);
     for (uint32_t i = 0; i < LC_INODES_PRE_BLOCK; ++i) {
         block_write(&inode_block, &inode, LC_INODE_SIZE, i * LC_INODE_SIZE);
@@ -132,15 +132,15 @@ void lc_initialize_inodes(std::ofstream &img_file, const LCSuperBlock &header) {
 
 // Mark the super block and inode blocks, inode bitmap blocks, block bitmap
 // blocks as allocated size = [0, header.data_start)
-void lc_initialize_block_bitmap(std::ofstream      &img_file,
-                                const LCSuperBlock &header) {
+void initialize_block_bitmap(std::ofstream      &img_file,
+                                const SuperBlock &header) {
     uint32_t signed_blocks = header.data_start;  // [0, header.data_start)
 
-    uint32_t bitmap_bytes = lc_ceil_divide_int32_t(signed_blocks, 8);
+    uint32_t bitmap_bytes = ceil_divide_int32_t(signed_blocks, 8);
     uint32_t bitmap_blocks =
-        lc_ceil_divide_int32_t(bitmap_bytes, DEFAULT_BLOCK_SIZE);
+        ceil_divide_int32_t(bitmap_bytes, DEFAULT_BLOCK_SIZE);
 
-    LCBlock bitmap_block {};
+    Block bitmap_block {};
     for (uint32_t block_index = 0; block_index < bitmap_blocks; ++block_index) {
         block_clear(&bitmap_block);
         uint8_t *bitmap_data = block_as(&bitmap_block);
