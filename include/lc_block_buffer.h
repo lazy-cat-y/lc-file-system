@@ -163,8 +163,8 @@ class BlockBufferPool {
     using FrameGuard    = BlockFrameGuard;
     using FrameLockType = BlockFrameGuardLockType;
     using ThreadPoolContextMetaData =
-        ThreadPoolContextMetaData<LCTaskPriority>;
-    using ContextFactory  = TreadPoolContextFactory<LCTaskPriority>;
+        ThreadPoolContextMetaData<TaskPriority>;
+    using ContextFactory  = TreadPoolContextFactory<TaskPriority>;
     using CancelTokenType = std::shared_ptr<std::atomic<bool>>;
 
     enum class FrameIndexSlotStatus {
@@ -241,8 +241,8 @@ public:
 
     LC_EXPLICIT BlockBufferPool(
         std::shared_ptr<BlockDevice> block_device, size_t pool_size,
-        std::shared_ptr<ThreadPool<LCTaskPriority>> write_thread_pool,
-        std::shared_ptr<ThreadPool<LCTaskPriority>> read_thread_pool) :
+        std::shared_ptr<ThreadPool<TaskPriority>> write_thread_pool,
+        std::shared_ptr<ThreadPool<TaskPriority>> read_thread_pool) :
         block_device_(std::move(block_device)),
         frame_pool_size_(pool_size),
         bg_thread_pool_(std::move(write_thread_pool)),
@@ -274,12 +274,12 @@ public:
             if (background_thread_.joinable()) {
                 background_thread_.join();
             }
-            flush_all(LCTaskPriority::High, nullptr);
+            flush_all(TaskPriority::High, nullptr);
         }
     }
 
     // This function copies the contents, ref_count is not incremented
-    void read_block(uint32_t block_id, Block &block, LCTaskPriority priority,
+    void read_block(uint32_t block_id, Block &block, TaskPriority priority,
                     CancelTokenType cancel_token) {
         while (true) {
             if (task_is_cancelled(cancel_token)) {
@@ -315,7 +315,7 @@ public:
         LC_ASSERT(false, "Block ID not found, this should not happen");
     }
 
-    void read_block(uint32_t block_id, LCTaskPriority priority,
+    void read_block(uint32_t block_id, TaskPriority priority,
                     CancelTokenType cancel_token, void *data, uint32_t size,
                     uint32_t offset = 0) {
         LC_ASSERT(size > 0, "Size must be positive");
@@ -359,7 +359,7 @@ public:
         LC_ASSERT(false, "Block ID not found, this should not happen");
     }
 
-    void write_block(uint32_t block_id, LCTaskPriority priority,
+    void write_block(uint32_t block_id, TaskPriority priority,
                      CancelTokenType cancel_token, const void *data,
                      uint32_t size, uint32_t offset = 0) {
         LC_ASSERT(size <= DEFAULT_BLOCK_SIZE - offset,
@@ -404,7 +404,7 @@ public:
         LC_ASSERT(false, "Failed to write block");
     }
 
-    void flush_block(uint32_t block_id, LCTaskPriority priority,
+    void flush_block(uint32_t block_id, TaskPriority priority,
                      CancelTokenType cancel_token) {
         if (task_is_cancelled(cancel_token)) {
             return;  // Exit if the task is cancelled
@@ -446,7 +446,7 @@ public:
         }
     }
 
-    void flush_all(LCTaskPriority priority, CancelTokenType cancel_token) {
+    void flush_all(TaskPriority priority, CancelTokenType cancel_token) {
         for (uint32_t i = 0; i < frame_pool_size_; ++i) {
             Frame      &frame           = *frame_pool_[i];
             FrameStatus expected_status = FrameStatus::Dirty;
@@ -470,7 +470,7 @@ public:
 
     void find_or_load_frame_with_version(uint32_t block_id, size_t &frame_index,
                                          uint64_t       &version,
-                                         LCTaskPriority  priority,
+                                         TaskPriority  priority,
                                          CancelTokenType cancel_token) {
         // frame_index = acquire_frame(block_id, priority, cancel_token);
 
@@ -499,7 +499,7 @@ public:
     }
 
     void lock_block(uint32_t block_id, FrameLockType &lock_type,
-                    FrameGuard &guard, LCTaskPriority priority,
+                    FrameGuard &guard, TaskPriority priority,
                     CancelTokenType cancel_token) {
         size_t   frame_index = 0;
         uint64_t version     = 0;
@@ -521,7 +521,7 @@ public:
 
 private:
 
-    FrameAcquireResult acquire_frame(uint32_t block_id, LCTaskPriority priority,
+    FrameAcquireResult acquire_frame(uint32_t block_id, TaskPriority priority,
                                      CancelTokenType cancel_token,
                                      size_t         &result_frame_index) {
         while (true) {
@@ -699,7 +699,7 @@ private:
             CancelTokenType cancel_token =
                 std::make_shared<std::atomic<bool>>(false);
 
-            flush_all(LCTaskPriority::Background, cancel_token);
+            flush_all(TaskPriority::Background, cancel_token);
 
             if (!running_.load(std::memory_order_acquire)) {
                 cancel_token->store(true, std::memory_order_release);
@@ -709,7 +709,7 @@ private:
     }
 
     void submit_flush_task(uint32_t block_id, size_t frame_index,
-                           LCTaskPriority priority, TraceTypeID trace_type,
+                           TaskPriority priority, TraceTypeID trace_type,
                            CancelTokenType cancel_token) {
         LC_ASSERT(bg_thread_pool_, "Write thread pool is not initialized");
         ThreadPoolContextMetaData metadata {};
@@ -798,7 +798,7 @@ private:
 
     LC_NODISCARD TaskSubmitResult
     submit_read_task(uint32_t block_id, size_t frame_index,
-                     LCTaskPriority priority, CancelTokenType cancel_token) {
+                     TaskPriority priority, CancelTokenType cancel_token) {
         LC_ASSERT(fg_thread_pool_, "Read thread pool is not initialized");
         LC_ASSERT(frame_index < frame_pool_size_,
                   "Frame index out of bounds for block buffer pool");
@@ -933,8 +933,8 @@ private:
 
     std::shared_ptr<BlockDevice>                block_device_;
     std::unique_ptr<WaitStrategyBase>           wait_strategy_;
-    std::shared_ptr<ThreadPool<LCTaskPriority>> bg_thread_pool_;
-    std::shared_ptr<ThreadPool<LCTaskPriority>> fg_thread_pool_;
+    std::shared_ptr<ThreadPool<TaskPriority>> bg_thread_pool_;
+    std::shared_ptr<ThreadPool<TaskPriority>> fg_thread_pool_;
     static constexpr const char *thread_name_ = "block_buffer_pool";
 
     // Buffer pool thread

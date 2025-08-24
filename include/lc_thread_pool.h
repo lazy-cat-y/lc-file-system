@@ -37,7 +37,7 @@ struct ThreadPoolContextMetaData {
 
 template <typename PriorityType>
 struct Context<ThreadPoolContextMetaData<PriorityType>> {
-    static_assert(std::is_same<PriorityType, LCTaskPriority>::value,
+    static_assert(std::is_same<PriorityType, TaskPriority>::value,
                   "Invalid priority type, must be LCTaskPriority");
     ThreadPoolContextMetaData<PriorityType> metadata;
     // std::bind(f, args...) or a lambda function
@@ -104,27 +104,27 @@ private:
 
 template <typename PriorityWeightType>
 struct LCPriorityWeights {
-    static constexpr size_t get_weight(LCTaskPriority priority) = 0;
+    static constexpr size_t get_weight(TaskPriority priority) = 0;
     static constexpr std::array<uint32_t, static_cast<size_t>(
-                                              LCTaskPriority::NUM_PRIORITIES)>
+                                              TaskPriority::NUM_PRIORITIES)>
         weights = {};
 };
 
 template <>
-struct LCPriorityWeights<LCTaskPriority> {
+struct LCPriorityWeights<TaskPriority> {
     static constexpr std::array<uint32_t, static_cast<size_t>(
-                                              LCTaskPriority::NUM_PRIORITIES)>
+                                              TaskPriority::NUM_PRIORITIES)>
         weights = {10, 8, 5, 3, 5};
 
     static constexpr std::array<
-        uint32_t, static_cast<size_t>(LCTaskPriority::NUM_PRIORITIES)>
+        uint32_t, static_cast<size_t>(TaskPriority::NUM_PRIORITIES)>
     get_weights() {
         return weights;
     }
 
     static constexpr size_t get_weight(size_t priority) {
         LC_ASSERT(
-            priority < static_cast<size_t>(LCTaskPriority::NUM_PRIORITIES),
+            priority < static_cast<size_t>(TaskPriority::NUM_PRIORITIES),
             "Invalid priority type");
         return weights[priority];
     }
@@ -132,7 +132,7 @@ struct LCPriorityWeights<LCTaskPriority> {
 
 template <typename T, typename PriorityType>
 class WeightedRoundRobinScheduler {
-    static_assert(std::is_same<PriorityType, LCTaskPriority>::value,
+    static_assert(std::is_same<PriorityType, TaskPriority>::value,
                   "Invalid priority type, must be LCTaskPriority");
 public:
 
@@ -150,7 +150,7 @@ public:
     WeightedRoundRobinScheduler &operator=(WeightedRoundRobinScheduler &&) =
         delete;
 
-    bool try_schedule(LCMPMCMultiPriorityQueue<T, PriorityType> &queue,
+    bool try_schedule(MPMCMultiPriorityQueue<T, PriorityType> &queue,
                       T                                         &task) {
         static const size_t num_priorities =
             static_cast<size_t>(PriorityType::NUM_PRIORITIES);
@@ -185,7 +185,7 @@ public:
         return false;
     }
 
-    bool drain_once(LCMPMCMultiPriorityQueue<T, PriorityType> &queue, T &task) {
+    bool drain_once(MPMCMultiPriorityQueue<T, PriorityType> &queue, T &task) {
         const size_t num = static_cast<size_t>(PriorityType::NUM_PRIORITIES);
         for (size_t i = 0; i < num; ++i) {
             if (queue.dequeue(task, static_cast<PriorityType>(i))) {
@@ -211,7 +211,7 @@ private:
 
 template <typename T, typename PriorityType>
 class DeficitWeightedRoundRobinScheduler {
-    static_assert(std::is_same<PriorityType, LCTaskPriority>::value,
+    static_assert(std::is_same<PriorityType, TaskPriority>::value,
                   "Invalid priority type, must be LCTaskPriority");
 public:
 
@@ -230,7 +230,7 @@ public:
     DeficitWeightedRoundRobinScheduler &operator=(
         DeficitWeightedRoundRobinScheduler &&) = delete;
 
-    bool try_schedule(LCMPMCMultiPriorityQueue<T, PriorityType> &queue,
+    bool try_schedule(MPMCMultiPriorityQueue<T, PriorityType> &queue,
                       T                                         &task) {
         static const size_t num_priorities =
             static_cast<size_t>(PriorityType::NUM_PRIORITIES);
@@ -249,7 +249,7 @@ public:
         return false;
     }
 
-    bool drain_once(LCMPMCMultiPriorityQueue<T, PriorityType> &queue, T &task) {
+    bool drain_once(MPMCMultiPriorityQueue<T, PriorityType> &queue, T &task) {
         const size_t num = static_cast<size_t>(PriorityType::NUM_PRIORITIES);
         for (size_t i = 0; i < num; ++i) {
             if (queue.dequeue(task, static_cast<PriorityType>(i))) {
@@ -285,7 +285,7 @@ template <class PriorityType>
 class ThreadPool {
     using ContextType = Context<ThreadPoolContextMetaData<PriorityType>>;
     using TimePoint   = std::atomic<std::chrono::steady_clock::time_point>;
-    static_assert(std::is_same<PriorityType, LCTaskPriority>::value,
+    static_assert(std::is_same<PriorityType, TaskPriority>::value,
                   "Invalid priority type, must be LCTaskPriority");
 public:
 
@@ -536,7 +536,7 @@ private:
         }
     }
 
-    LCMPMCMultiPriorityQueue<ContextType, PriorityType> task_queue_;
+    MPMCMultiPriorityQueue<ContextType, PriorityType> task_queue_;
 
     const std::string              name_;
     std::size_t                    thread_count_;

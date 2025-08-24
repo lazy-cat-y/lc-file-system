@@ -22,10 +22,10 @@ LC_FILESYSTEM_NAMESPACE_BEGIN
 #define __LC_ALIGNAS_CACHELINE 64
 
 template <typename Tp_>
-class LCMPMCQueue {
+class MPMCQueue {
 public:
 
-    LC_EXPLICIT LCMPMCQueue(size_t buffer_size) :
+    LC_EXPLICIT MPMCQueue(size_t buffer_size) :
         buffer_mask_(buffer_size - 1) {
         LC_ASSERT(buffer_size >= 2 && (buffer_size & (buffer_size - 1)) == 0,
                   "Buffer size must be a power of two and at least 2.");
@@ -37,13 +37,13 @@ public:
         dequeue_index_.store(0, std::memory_order_release);
     }
 
-    ~LCMPMCQueue() = default;
+    ~MPMCQueue() = default;
 
-    LCMPMCQueue()                               = delete;
-    LCMPMCQueue(const LCMPMCQueue &)            = delete;
-    LCMPMCQueue &operator=(const LCMPMCQueue &) = delete;
-    LCMPMCQueue(LCMPMCQueue &&)                 = delete;
-    LCMPMCQueue &operator=(LCMPMCQueue &&)      = delete;
+    MPMCQueue()                               = delete;
+    MPMCQueue(const MPMCQueue &)            = delete;
+    MPMCQueue &operator=(const MPMCQueue &) = delete;
+    MPMCQueue(MPMCQueue &&)                 = delete;
+    MPMCQueue &operator=(MPMCQueue &&)      = delete;
 
     LC_NODISCARD bool enqueue(Tp_ item) {
         size_t pos = enqueue_index_.load(std::memory_order_relaxed);
@@ -121,7 +121,7 @@ private:
 //     NUM_PRIORITIES,  // Number of priorities defined
 // };
 
-enum class LCTaskPriority {
+enum class TaskPriority {
     Critical,        // metadata, directory traversal, opening file headers
     High,            // user requests, latency-sensitive
     Normal,          // sequential reads, page loading, etc.
@@ -131,36 +131,36 @@ enum class LCTaskPriority {
 };
 
 template <typename PriorityType>
-struct LCPriorityTraits;
+struct PriorityTraits;
 
 template <>
-struct LCPriorityTraits<LCTaskPriority> {
-    static LC_CONSTEXPR size_t get_priority_queue_size(LCTaskPriority pri) {
+struct PriorityTraits<TaskPriority> {
+    static LC_CONSTEXPR size_t get_priority_queue_size(TaskPriority pri) {
         switch (pri) {
-            case LCTaskPriority::Critical   : return 64;
-            case LCTaskPriority::High       : return 128;
-            case LCTaskPriority::Normal     : return 256;
-            case LCTaskPriority::Low        : return 512;
-            case LCTaskPriority::Background : return 1024;
+            case TaskPriority::Critical   : return 64;
+            case TaskPriority::High       : return 128;
+            case TaskPriority::Normal     : return 256;
+            case TaskPriority::Low        : return 512;
+            case TaskPriority::Background : return 1024;
             default                         : return 0;  // Invalid priority
         }
     }
 };
 
 template <class Tp_, class PriorityType>
-class LCMPMCMultiPriorityQueue {
-    static_assert(std::is_same<PriorityType, LCTaskPriority>::value,
+class MPMCMultiPriorityQueue {
+    static_assert(std::is_same<PriorityType, TaskPriority>::value,
                   "Invalid priority type, must be either LCTaskPriority");
 public:
 
-    LCMPMCMultiPriorityQueue() {
+    MPMCMultiPriorityQueue() {
         size_t num_priorities =
             static_cast<size_t>(PriorityType::NUM_PRIORITIES);
         try {
             queues_ =
-                lc_construct_array_indexed<LCMPMCQueue<Tp_>>(num_priorities,
+                lc_construct_array_indexed<MPMCQueue<Tp_>>(num_priorities,
                                                              [](size_t i) {
-                return LCPriorityTraits<PriorityType>::get_priority_queue_size(
+                return PriorityTraits<PriorityType>::get_priority_queue_size(
                     static_cast<PriorityType>(i));
             });
             if (!queues_) {
@@ -174,19 +174,19 @@ public:
         size_.store(0, std::memory_order_relaxed);
     }
 
-    ~LCMPMCMultiPriorityQueue() {
+    ~MPMCMultiPriorityQueue() {
         lc_destroy_array(queues_,
                          static_cast<size_t>(PriorityType::NUM_PRIORITIES));
     }
 
-    LCMPMCMultiPriorityQueue(const LCMPMCMultiPriorityQueue &) = delete;
-    LCMPMCMultiPriorityQueue &operator=(const LCMPMCMultiPriorityQueue &) =
+    MPMCMultiPriorityQueue(const MPMCMultiPriorityQueue &) = delete;
+    MPMCMultiPriorityQueue &operator=(const MPMCMultiPriorityQueue &) =
         delete;
-    LCMPMCMultiPriorityQueue(LCMPMCMultiPriorityQueue &&)            = delete;
-    LCMPMCMultiPriorityQueue &operator=(LCMPMCMultiPriorityQueue &&) = delete;
+    MPMCMultiPriorityQueue(MPMCMultiPriorityQueue &&)            = delete;
+    MPMCMultiPriorityQueue &operator=(MPMCMultiPriorityQueue &&) = delete;
 
     template <typename P = PriorityType,
-              std::enable_if_t<std::is_same_v<P, LCTaskPriority>, int> = 0>
+              std::enable_if_t<std::is_same_v<P, TaskPriority>, int> = 0>
     bool enqueue(Tp_ item, P priority) {
         size_t index = static_cast<size_t>(priority);
         LC_ASSERT(index < static_cast<size_t>(PriorityType::NUM_PRIORITIES),
@@ -214,7 +214,7 @@ public:
     // }
 
     template <typename P = PriorityType,
-              std::enable_if_t<std::is_same_v<P, LCTaskPriority>, int> = 0>
+              std::enable_if_t<std::is_same_v<P, TaskPriority>, int> = 0>
     bool dequeue(Tp_ &item, P priority) {
         size_t index = static_cast<size_t>(priority);
         LC_ASSERT(index < static_cast<size_t>(PriorityType::NUM_PRIORITIES),
@@ -234,7 +234,7 @@ public:
     }
 
 private:
-    LCMPMCQueue<Tp_>   *queues_;
+    MPMCQueue<Tp_>   *queues_;
     std::atomic<size_t> size_;
 };
 

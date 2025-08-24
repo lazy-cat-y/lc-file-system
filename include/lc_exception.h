@@ -97,7 +97,7 @@ LC_NORETURN inline void fatal_exception(const char *fmt, ...) {
     std::time_t t = std::time(nullptr);
     char        buf[32];
     std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", std::localtime(&t));
-
+    // TODO print to log file in thr future
     va_list args;
     va_start(args, fmt);
     fprintf(stderr, "[%s] Fatal error: ", buf);
