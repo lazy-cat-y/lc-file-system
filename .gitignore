@@ -73,3 +73,5 @@ notes.*
 
 # Test files
 test_imgs/
+
+tmp/
