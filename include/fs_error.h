@@ -2,11 +2,14 @@
 #define FS_ERROR_H
 
 #include "fs_config.h"
+#include "fs_types.h"
 
 FS_NAMESPACE_BEGIN
 
-enum class ImgStatue {
+enum class ImgCreateStatue : uint32 {
     Success,
+    InvalidParams,
+    Unsupported,
     CreationFailed,
     AlreadyExists,
     NotExist,

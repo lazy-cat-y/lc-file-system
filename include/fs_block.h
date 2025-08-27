@@ -28,32 +28,66 @@ inline uint8 *block_as(Block *block) {
     return (uint8 *)block->data;
 }
 
+enum class IncompatType : uint32 {
+    INCOMPAT_HAS_JOURNAL      = 1u << 0,
+    INCOMPAT_EXTERNAL_JOURNAL = 1u << 1,
+    INCOMPAT_64BIT            = 1u << 2
+};
+
+enum class JournalType : uint8 {
+    None      = 0,
+    Inode     = 1,
+    FixedArea = 2,
+    External  = 3,
+};
+
 struct SuperBlock {
-    uint32 magic      = BLOCK_MAGIC_NUMBER;
-    uint32 block_size = DEFAULT_BLOCK_SIZE;
-    uint8  version    = 2;
+    le32 inode_count;
+    le64 block_count;
 
-    uint32 img_total_blocks;
+    le32 free_inode_count;
+    le64 free_block_count;
 
-    // —— Reserve: WAL Layout (only describes position and size, not used yet)
-    // WAL_SZ = 1/32 MAX: 128MB
-    uint32 l_start;                      // WAL Start block
-    uint32 l_total_blocks;               // WAL Total blocks
-    uint32 l_seg_blocks = L_SEG_BLOCKS;  // WAL Segment size in blocks
+    le64 first_data_block;
 
-    uint32 block_bitmap_start;           // = wal_start + wal_total_blocks
+    le32 log_block_size;
 
-    uint32 inode_count;
-    uint32 inode_bitmap_start;  // = block_bitmap_start + number of blocks of
-                                // block_bitmap
+    le32 block_pre_group;
+    le32 inode_pre_group;
 
-    uint32 inode_block_count;
-    uint32 inode_block_start;   // = inode_bitmap_start + number of blocks of
-                                // inode_bitmap
+    le16 log_inode_size;
+    le16 inode_size_reserved;
 
-    uint32 data_start;          // = inode_start + inode_block_count
+    le32 magic;
 
-    uint32 crc;
+    u8 uuid[16];
+
+    le64 mtime;
+    le64 wtime;
+
+    le32 incompat_flags;
+    u8   jnl_type;
+    u8   jnl_csum_type;
+    le16 jnl_reserved;
+
+    union {
+        struct {
+            le64 jnl_inode;
+        } in_inum;
+
+        struct {
+            le64 jnl_start_block;
+            le64 jnl_len_blocks;
+        } in_fixed;
+
+        struct {
+            u8 jnl_uuid[16];
+        } external;
+    } jnl;
+
+    u8   csum_type;
+    u8   csum_reserved[3];
+    le32 csum;
 } __attribute__((packed));
 
 FS_NAMESPACE_END
