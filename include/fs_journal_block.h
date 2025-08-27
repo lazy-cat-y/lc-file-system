@@ -6,6 +6,9 @@
 
 FS_NAMESPACE_BEGIN
 
+static constexpr uint32 JOURNAL_SUPERBLOCK_MAGIC = 0x4C434A53u;
+static constexpr uint32 JOURNAL_DEFAULT_BLOCK_SIZE = 4096;
+
 struct JournalSuper {
     be32 log_block_size;
 

@@ -7,7 +7,7 @@
 FS_NAMESPACE_BEGIN
 
 static constexpr uint32 DEFAULT_BLOCK_SIZE = 4096;
-static constexpr uint32 BLOCK_MAGIC_NUMBER = 0xDEADBEEF;
+static constexpr uint32 BLOCK_MAGIC_NUMBER = 0x4C435346u;
 
 static constexpr uint8 SUPER_BLOCK_COUNT = 8;
 
