@@ -31,6 +31,10 @@ function(add_lcfs_test test_name)
     add_test(NAME ${test_name} COMMAND ${test_name})
 endfunction()
 
+add_lcfs_test(create_volume_external_journal_test
+    create_volume_external_journal_test.cc
+)
+
 # add_lcfs_test(image_format_test
 #     image_format_test.cpp
 # )

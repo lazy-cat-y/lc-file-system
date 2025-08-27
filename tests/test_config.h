@@ -4,6 +4,10 @@
 #include <filesystem>
 #include <string>
 
+static uint64_t test_align_up(uint64_t v, uint64_t a) {
+    return (v + (a - 1)) / a * a;
+}
+
 #define IMG_DIR_PATH "./test_imgs"
 
 inline std::string get_test_img(std::string img_name) {

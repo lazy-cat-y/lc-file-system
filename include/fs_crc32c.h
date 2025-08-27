@@ -10,7 +10,7 @@ FS_NAMESPACE_BEGIN
 #  include <nmmintrin.h>
 
 inline uint32 crc32c_hw_x86(uint32 seed, const uint8 *p, size_t n) {
-    uint64 c = ~static_cast<uint32>(seed);
+    uint64 c = static_cast<uint32>(seed);
     while (n && (reinterpret_cast<uintptr_t>(p) & 7u)) {
         c = _mm_crc32_u8(static_cast<uint32>(c), *p++);
         --n;
@@ -25,15 +25,15 @@ inline uint32 crc32c_hw_x86(uint32 seed, const uint8 *p, size_t n) {
     while (n--) {
         c32 = _mm_crc32_u8(c32, *p++);
     }
-    return ~c32;
+    return c32 ^ seed;
 }
 
 // ---------------- ARMv8 CRC ----------------
 #elif defined(__aarch64__)
 #  include <arm_acle.h>
-
-inline uint32 crc32c_hw_arm(uint32 seed, const uint8 *p, size_t n) {
-    uint32 c = ~seed;
+__attribute__((target("crc"))) __attribute__((noinline))
+static uint32 crc32c_hw_arm(uint32 seed, const uint8 *p, size_t n) {
+    uint32 c = seed;
     while (n && (reinterpret_cast<uintptr_t>(p) & 7u)) {
         c = __crc32cb(c, *p++);
         --n;
@@ -47,7 +47,7 @@ inline uint32 crc32c_hw_arm(uint32 seed, const uint8 *p, size_t n) {
     while (n--) {
         c = __crc32cb(c, *p++);
     }
-    return ~c;
+    return c ^ seed;
 }
 
 #else
@@ -106,11 +106,11 @@ static constexpr uint32 crc32Table[256] = {
     0xAD7D5351L};
 
 inline uint32 crc32c_sw(uint32 seed, const uint8 *p, size_t n) {
-    uint32 c = ~seed;
+    uint32 c = seed;
     for (size_t i = 0; i < n; ++i) {
         c = crc32Table[(c ^ p[i]) & 0xFFu] ^ (c >> 8);
     }
-    return ~c;
+    return c ^ seed;
 }
 #endif
 
