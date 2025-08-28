@@ -1,8 +1,14 @@
 #ifndef FS_TYPES_H
 #define FS_TYPES_H
 
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
 
 #include "fs_config.h"
 
@@ -42,6 +48,21 @@ template <typename T>
 using shared_ptr = std::shared_ptr<T>;
 template <typename T>
 using weak_ptr = std::weak_ptr<T>;
+
+template <typename T>
+using vector = std::vector<T>;
+
+using thread = std::thread;
+
+template <typename T>
+using atomic = std::atomic<T>;
+
+using condition_variable = std::condition_variable;
+using mutex              = std::mutex;
+template <typename T>
+using lock_guard = std::lock_guard<T>;
+template <typename T>
+using unique_lock = std::unique_lock<T>;
 
 FS_NAMESPACE_END
 

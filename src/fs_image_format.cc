@@ -103,7 +103,10 @@ ImgCreateStatue create_volume(VolumeParams       &params,
     sb.jnl_reserved   = 0;
 
     if (params.journal_params.type == JournalType::External) {
-        fs_memcpy(sb.jnl.external.jnl_uuid, params.journal_params.jnl_uuid, 16);
+        sb.jnl_in_inum        = 0;
+        sb.jnl_in_fixed_start = 0;
+        sb.jnl_in_fixed_end   = 0;
+        fs_memcpy(sb.jnl_external_uuid, params.journal_params.jnl_uuid, 16);
     } else {
         ::close(img_fd);
         return ImgCreateStatue::Unsupported;
@@ -146,16 +149,20 @@ ImgCreateStatue create_volume(VolumeParams       &params,
         be64 len_blocks  = htobe64(jnl_blocks);
         be64 start_block = htobe64(params.journal_params.start_block);
         be32 magic       = htobe32(params.journal_params.jnl_magic);
+        be32 sequence    = htobe32(0);
+        be32 block_type =
+            htobe32(static_cast<uint32>(JournalBlockType::JounralSuperBlock));
 
         JournalSuper js {};
+
+        js.header.magic      = magic;
+        js.header.block_type = block_type;
+        js.header.sequence   = sequence;
+
         js.log_block_size = log_block_size;
 
         js.len_blocks  = len_blocks;
         js.start_block = start_block;
-
-        js.sequence = 0;
-
-        js.magic = magic;
 
         fs_memcpy(js.uuid, params.journal_params.jnl_uuid, 16);
 

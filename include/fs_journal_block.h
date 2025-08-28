@@ -6,24 +6,47 @@
 
 FS_NAMESPACE_BEGIN
 
-static constexpr uint32 JOURNAL_SUPERBLOCK_MAGIC = 0x4C434A53u;
+static constexpr uint32 JOURNAL_SUPERBLOCK_MAGIC   = 0x4C434A53u;
 static constexpr uint32 JOURNAL_DEFAULT_BLOCK_SIZE = 4096;
 
+enum class JournalBlockType : uint32 {
+    DesriptorBlock       = 1,
+    BlockCommitRecord    = 2,
+    JounralSuperBlock    = 3,
+    BlockRevocationBlock = 4
+};
+
+struct JournalBLockHeader {
+    be32 magic;
+    be32 block_type;
+    be32 sequence;
+};
+
 struct JournalSuper {
+    JournalBLockHeader header;
+
     be32 log_block_size;
 
     be64 len_blocks;
     be64 start_block;
-
-    be32 sequence;  // First commit ID expected in log.
-
-    be32 magic;
 
     u8 uuid[16];
 
     u8   csum_type;
     u8   csum_type_reserved[3];
     be32 csum;
+};
+
+struct JournalBlockTag {
+    be64 block_number;
+    be32 csum;  // jounral uuid + block number + block data
+};
+
+struct JournalBlockDescriptor {
+    JournalBLockHeader header;
+
+    be64                    block_count;
+    vector<JournalBlockTag> tags;
 };
 
 FS_NAMESPACE_END

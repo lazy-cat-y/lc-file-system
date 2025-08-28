@@ -70,20 +70,10 @@ struct SuperBlock {
     u8   jnl_csum_type;
     le16 jnl_reserved;
 
-    union {
-        struct {
-            le64 jnl_inode;
-        } in_inum;
-
-        struct {
-            le64 jnl_start_block;
-            le64 jnl_len_blocks;
-        } in_fixed;
-
-        struct {
-            u8 jnl_uuid[16];
-        } external;
-    } jnl;
+    le64 jnl_in_inum;
+    le64 jnl_in_fixed_start;
+    le64 jnl_in_fixed_end;
+    u8 jnl_external_uuid[16];
 
     u8   csum_type;
     u8   csum_reserved[3];

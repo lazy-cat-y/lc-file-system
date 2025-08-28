@@ -1,11 +1,15 @@
 #ifndef FS_MEMORY_H
 #define FS_MEMORY_H
 
-#include "fs_config.h"
-#include "fs_types.h"
+#include <atomic>
 #include <cstring>
 
+#include "fs_config.h"
+#include "fs_types.h"
+
 FS_NAMESPACE_BEGIN
+
+using MemOrder = std::memory_order;
 
 inline void *fs_memset(void *ptr, int value, size_t num) {
     return memset(ptr, value, num);
@@ -62,6 +66,7 @@ inline char *fs_strdup(const char *str) {
 inline void fs_strfree(char *str) {
     free(str);
 }
+
 FS_NAMESPACE_END
 
 #endif  // FS_MEMORY_H
