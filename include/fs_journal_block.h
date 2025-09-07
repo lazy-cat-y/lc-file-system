@@ -16,14 +16,14 @@ enum class JournalBlockType : uint32 {
     BlockRevocationBlock = 4
 };
 
-struct JournalBLockHeader {
+struct JournalBlockHeader {
     be32 magic;
     be32 block_type;
     be32 sequence;
 };
 
 struct JournalSuper {
-    JournalBLockHeader header;
+    JournalBlockHeader header;
 
     be32 log_block_size;
 
@@ -42,12 +42,11 @@ struct JournalBlockTag {
     be32 csum;  // jounral uuid + block number + block data
 };
 
-struct JournalBlockDescriptor {
-    JournalBLockHeader header;
+// struct JournalBlockDescriptor {
+//     JournalBlockHeader header;
 
-    be64                    block_count;
-    vector<JournalBlockTag> tags;
-};
+//     unique_ptr<JournalBlockTag[]> tags;
+// };
 
 FS_NAMESPACE_END
 

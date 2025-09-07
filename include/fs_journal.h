@@ -5,13 +5,10 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#include <new>
-
 #include "fs_config.h"
 #include "fs_journal_block.h"
 #include "fs_memory.h"
 #include "fs_types.h"
-#include "fs_utils.h"
 
 FS_NAMESPACE_BEGIN
 
@@ -20,15 +17,42 @@ enum class JounralSysError {
     OpenFailed,
     ReadFailed,
     WriteFailed,
+    FsyncFailed,
     InvalidSuperBlock,
     InvalidJournalFile,
     UnsupportedFeature,
+    NoSpace,
+    Busy,
+    InvalidArgument,
+    CorruptedLog,
 };
 
-struct JournalCommitParams {
-    JournalBlockDescriptor &desc;
-    uint8                  *data;
-    bool                    sync;
+enum class JournalWriteFlags : uint32 {
+    None     = 0,
+    Sync     = 1u << 0,
+    Metadata = 1u << 1,
+    Data     = 1u << 2,
+};
+
+struct JournalWriteParams {
+    const u8 *data;
+    uint64    data_bytes;
+    uint32    flags;
+};
+
+struct JournalHandle {
+    uint32 credits;
+    uint32 used = 0;
+    uint32 tx_seq;
+    bool   active = false;
+    // 可扩展：调用线程 id、开始时间等
+};
+
+struct JournalTxnInfo {
+    uint32 tx_seq;     // 事务序号
+    uint64 start_off;  // 在日志空间中的起始偏移（字节/块）
+    uint64 end_off;    // …结束偏移
+    bool   committed;  // 是否已写入 commit record
 };
 
 class JournalSys {
@@ -61,7 +85,11 @@ public:
             return;
         }
         fs_memcpy(&super, &journal_super, sizeof(JournalSuper));
+        journal_area_bytes =
+            journal_super.len_blocks * JOURNAL_DEFAULT_BLOCK_SIZE;
         is_journal_running.store(true, MemOrder::memory_order_release);
+        // TODO: start recovery
+        // TODO: start background thread
     }
 
     JournalSys(JournalSys &&)                 = delete;
@@ -82,102 +110,115 @@ public:
         }
     }
 
-    JounralSysError commit(const JournalCommitParams &params) {
-        if (jnl_fd < 0) {
-            return JounralSysError::OpenFailed;
-        }
+    // 1) journal_start / journal_stop（可选：若实现并发 handle/credits）
+    //    - 开启一次 journaling 操作并返回句柄（内部记录 credits
+    //    以进行空间/提交管理）
+    JounralSysError journal_start(JournalHandle &handle, uint32 credits);
 
-        // TODO: recycle the useless area
+    //    - 结束本次 journaling，释放 credits；若当前事务所有 handle
+    //    均结束，则可进入提交阶段
+    JounralSysError journal_stop(JournalHandle &handle);
 
-        const uint64 header_bytes = sizeof(params.desc.header);
-        const uint64 tag_bytes =
-            params.desc.tags.size() * sizeof(JournalBlockTag);
-        const uint64 data_bytes  = params.desc.tags.size() * DEFAULT_BLOCK_SIZE;
-        const uint64 block_count = htobe64(params.desc.block_count);
+    // 2) 写一批元数据缓冲到日志（对应 jbd2_journal_write_metadata_buffer）
+    //    - 若不实现 handle，可忽略 handle
+    //    参数的使用，但接口保留（方便未来演进）
+    JounralSysError journal_write_metadata_buffer(JournalHandle *opt_handle,
+                                                  const JournalWriteParams &p);
 
-        uint64 write_size =
-            header_bytes + tag_bytes + data_bytes + sizeof(uint64);
+    // 3) 可选：如果也记录数据块（不推荐，但给出独立入口）
+    JounralSysError journal_write_data_buffer(JournalHandle *opt_handle,
+                                              const JournalWriteParams &p);
 
-        unique_ptr<uint8_t[]> write_buf(new (std::nothrow) uint8_t[write_size]);
-        if (!write_buf) {
-            return JounralSysError::WriteFailed;
-        }
+    // 4) 强制触发提交（对应 jbd2_journal_force_commit）
+    //    - 外部请求立即将当前可提交的事务刷入日志（写入 commit record）
+    JounralSysError journal_force_commit();
 
-        uint8_t *p = write_buf.get();
-        fs_memcpy(p, &params.desc.header, header_bytes);
-        p += header_bytes;
-        fs_memcpy(p, &block_count, sizeof(uint64));
-        p += sizeof(uint64);
-        if (tag_bytes) {
-            fs_memcpy(p, params.desc.tags.data(), tag_bytes);
-            p += tag_bytes;
-        }
-        if (data_bytes) {
-            fs_memcpy(p, params.data, data_bytes);
-        }
+    // 5) 提交启动（软触发，允许后台线程择机提交；对应 jbd2_journal_start_commit
+    // 的语义）
+    JounralSysError journal_start_commit();
 
-        uint64 base_off =
-            tail.fetch_add(write_size, MemOrder::memory_order_acq_rel);
-        uint64 written = 0;
-        while (written < write_size) {
-            ssize_t n = pwrite(jnl_fd,
-                               write_buf.get() + written,
-                               write_size - written,
-                               static_cast<off_t>(base_off + written));
-            if (n < 0) {
-                return JounralSysError::WriteFailed;
-            }
-            written += static_cast<size_t>(n);
-        }
+    // 6) 检查点（将已提交事务中的数据真正应用到主文件系统区域，并推进 tail）
+    //    - 对应“checkpoint”阶段，回收日志空间
+    JounralSysError journal_checkpoint_once();
 
-        uint64 my_end = base_off + write_size;
+    // 7) 恢复（mount/replay）
+    //    - 扫描日志，找到最新有效事务序列范围并重放
+    JounralSysError journal_recover();
 
-        if (params.sync) {
-            {
-                lock_guard<mutex> lk(mtx);
-                uint64            cur_goal =
-                    sync_goal.load(MemOrder::memory_order_relaxed);
-                if (my_end > cur_goal) {
-                    sync_goal.store(my_end, MemOrder::memory_order_relaxed);
-                }
-            }
-            cv.notify_all();
+    // 8) 撤销（可选，对应 Revocation blocks）
+    //    - 在同一事务中撤销某些块的重放
+    JounralSysError journal_revoke_block(uint64 fs_block_number);
 
-            unique_lock<mutex> lk(mtx);
-            cv_done.wait(lk, [&] {
-                return flushed_tail.load(MemOrder::memory_order_acquire) >=
-                           my_end ||
-                       !is_journal_running.load(MemOrder::memory_order_acquire);
-            });
-        }
+    // 9) 同步（fsync）- 针对日志文件本身
+    JounralSysError journal_fsync();
 
-        return JounralSysError::Success;
-    }
+    // 10) 查询与统计
+    uint64 head_offset_bytes() const;        // 有效数据起点
+    uint64 tail_offset_bytes() const;        // 有效数据终点（下一写入位置）
+    uint32 current_tx_sequence() const;      // 当前构建中的事务序号
+    uint32 last_committed_sequence() const;  // 最近一次提交完成的事务序号
 
 private:
 
-    void journal_sync_worker() {}
+    // 追加一个描述块 + payload 到日志（做切块/CRC/对齐/环区 wrap）
+    JounralSysError append_descriptor_and_payload(
+        const JournalWriteParams &p,
+        /*out*/ uint64           &bytes_appended);
 
-    // move header to the seq that flush to the disk
-    void checkout_journal() {}
+    // 追加 commit record（BlockCommitRecord），推进 last_committed_seq
+    JounralSysError append_commit_record(uint32 tx_seq);
+
+    // 追加 revocation block
+    JounralSysError append_revocation_block();
+
+    // 执行一次事务提交：封口 + fsync（由后台线程或强制提交触发）
+    JounralSysError do_commit_one_transaction(/*in */ uint32          tx_seq,
+                                              /*out*/ JournalTxnInfo &info);
+
+    // 将已提交事务进行 checkpoint（把被记录的目标块写回主区，推进 head）
+    JounralSysError do_checkpoint_transactions(/*budget*/ uint32 max_txn);
+
+    // 日志空间管理：检查剩余空间，必要时等待 checkpoint 回收或切换事务
+    bool ensure_log_space(uint32 blocks_needed);
+
+    // 计算校验（可替换为 CRC32C）
+    uint32 calc_block_csum(const u8 *buf, uint64 nbytes, const u8 uuid[16],
+                           uint64 block_no) const;
+
+    // 后台提交线程（类似 kjournald2）：周期性提交 & checkpoint
+    void journal_sync_worker();
+
+    // 恢复：定位可重放的起始序列与终止序列
+    JounralSysError recover_scan(/*out*/ uint32 &first_seq,
+                                 /*out*/ uint32 &last_seq);
+    // 恢复：重放 [first_seq, last_seq]
+    JounralSysError recover_replay(uint32 first_seq, uint32 last_seq);
+
+    // IO
+    JounralSysError pwrite_all(const void *buf, uint64 len, uint64 off);
+    JounralSysError pread_all(void *buf, uint64 len, uint64 off);
 
 private:
     static constexpr uint32 MAX_COMMIT_TIME_MS = 10;
     mutex                   mtx;
-    condition_variable      cv;
-    condition_variable      cv_done;
+    condition_variable      cv_need_commit;
+    condition_variable      cv_commit_done;
 
     // ---|-------------------|----
     //    head  vaild         tail
-    atomic<uint64> head;
-    atomic<uint64> tail;
-    atomic<uint64> flushed_tail;
-    atomic<uint32> sync_goal;
+    atomic<uint64> head {0};
+    atomic<uint64> tail {0};
+    atomic<uint64> flushed_tail {0};
+    atomic<uint32> sync_goal {0};
+
+    atomic<uint32> cur_tx_seq {0};  // 正在构建的事务
+    atomic<uint32> last_committed_seq {0};
 
     thread       kjournal;
     int32        jnl_fd = -1;
     atomic<bool> is_journal_running;
     JournalSuper journal_super;
+    uint64       journal_area_bytes;
 
     shared_ptr<atomic<uint32>> latest_flushed_disk_seq;
 };
