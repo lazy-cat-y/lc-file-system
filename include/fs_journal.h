@@ -9,6 +9,7 @@
 #include "fs_journal_block.h"
 #include "fs_memory.h"
 #include "fs_types.h"
+#include "fs_utils.h"
 
 FS_NAMESPACE_BEGIN
 
@@ -41,7 +42,7 @@ struct JournalWriteParams {
 };
 
 struct JournalHandle {
-    uint32 credits;
+    uint32 resserved_credits;
     uint32 used = 0;
     uint32 tx_seq;
     bool   active = false;
@@ -66,7 +67,7 @@ public:
             jnl_fd = -1;
             error  = JounralSysError::OpenFailed;
             return;
-        }
+        } 
         // read super block
         journal_super = {};
         if (pread(jnl_fd, &journal_super, sizeof(JournalSuper), 0)) {
@@ -74,7 +75,7 @@ public:
             close(jnl_fd);
             return;
         }
-        if (journal_super.header.magic != htobe32(JOURNAL_SUPERBLOCK_MAGIC)) {
+        if (journal_super.header.magic != to_be32(JOURNAL_SUPERBLOCK_MAGIC)) {
             error = JounralSysError::InvalidSuperBlock;
             close(jnl_fd);
             return;
@@ -113,6 +114,10 @@ public:
     // 1) journal_start / journal_stop（可选：若实现并发 handle/credits）
     //    - 开启一次 journaling 操作并返回句柄（内部记录 credits
     //    以进行空间/提交管理）
+    //    - 查询已有空间
+    //      - 不足：回收空间
+    //    - 分配已有空间 -> 这里是否要锁定空间?
+    //    - 返回结果
     JounralSysError journal_start(JournalHandle &handle, uint32 credits);
 
     //    - 结束本次 journaling，释放 credits；若当前事务所有 handle
