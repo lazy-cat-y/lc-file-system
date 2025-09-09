@@ -42,7 +42,8 @@ struct JournalWriteParams {
 };
 
 struct JournalHandle {
-    uint32 resserved_credits;
+    uint32 reserved_credits;
+    uint32 used_credits;
     uint32 used = 0;
     uint32 tx_seq;
     bool   active = false;
@@ -56,6 +57,45 @@ struct JournalTxnInfo {
     bool   committed;  // 是否已写入 commit record
 };
 
+/*
+ * buffer range:
+ * [head ......... tail]
+ * ^^^^^^^^^^^^^^^
+ * valid
+ *
+ *[tail .......... head]
+ * ^^^^^^^^^^^^^^^
+ * allocatable
+ *
+ * credit: atomic uint64 -> block
+ * tail: atomic uint64 -> block
+ * head: atomic uint64 -> block
+ * capacity: const uint64 -> block
+ *
+ * allocate:
+ * credit -= space
+ * tail advances space
+ * write_start = (tail + space) % capacity
+ *
+ * reclaim (space: uint64):
+ * head advances space
+ * credit += space
+ *
+ */
+
+// clang-format off
+// JounralSysError journal_start(JournalHandle& h, uint32_t credits_blocks);
+// JounralSysError journal_extend(JournalHandle& h, uint32_t more_blocks);
+//
+// // 每写一个日志“块”时：检查预算 -> 分配物理位置(推进head) -> 写入 -> h.used_blocks++
+// JounralSysError journal_write_desc(JournalHandle& h, /*...*/); // h.n_desc_blocks++, h.used_blocks++
+// JounralSysError journal_write_data(JournalHandle& h, /*...*/); // h.n_data_blocks++, h.used_blocks++
+// JounralSysError journal_write_commit(JournalHandle& h, /*...*/);// h.n_commit_blocks++, h.used_blocks++
+//
+// // 结束时：把 (reserved_blocks - used_blocks) 退回到全局预算计数；
+// // 物理空间不回退，等 checkpoint 推 tail 后覆盖。
+// void journal_stop(JournalHandle& h);
+// clang-format on
 class JournalSys {
 public:
     JournalSys() = delete;
@@ -67,7 +107,7 @@ public:
             jnl_fd = -1;
             error  = JounralSysError::OpenFailed;
             return;
-        } 
+        }
         // read super block
         journal_super = {};
         if (pread(jnl_fd, &journal_super, sizeof(JournalSuper), 0)) {
@@ -88,7 +128,7 @@ public:
         fs_memcpy(&super, &journal_super, sizeof(JournalSuper));
         journal_area_bytes =
             journal_super.len_blocks * JOURNAL_DEFAULT_BLOCK_SIZE;
-        is_journal_running.store(true, MemOrder::memory_order_release);
+        is_journal_running.store(true, MemOrder::Release);
         // TODO: start recovery
         // TODO: start background thread
     }
@@ -99,8 +139,8 @@ public:
     JournalSys &operator=(const JournalSys &) = delete;
 
     ~JournalSys() {
-        if (is_journal_running.load(MemOrder::memory_order_acquire)) {
-            is_journal_running.store(false, MemOrder::memory_order_release);
+        if (is_journal_running.load(MemOrder::Acquire)) {
+            is_journal_running.store(false, MemOrder::Release);
             // lase fsync
             if (kjournal.joinable()) {
                 kjournal.join();
@@ -111,14 +151,32 @@ public:
         }
     }
 
-    // 1) journal_start / journal_stop（可选：若实现并发 handle/credits）
+    // 1) journal_start / journal_stop（可选：若实现并发 handle/credits -> how
+    // many block should be writen）
     //    - 开启一次 journaling 操作并返回句柄（内部记录 credits
     //    以进行空间/提交管理）
     //    - 查询已有空间
     //      - 不足：回收空间
     //    - 分配已有空间 -> 这里是否要锁定空间?
     //    - 返回结果
-    JounralSysError journal_start(JournalHandle &handle, uint32 credits);
+    //    这一步只扣除总的credits，如果没用完在journal_stop阶段回退给总credits
+    JounralSysError journal_start(JournalHandle &handle,
+                                  uint64         credits_blocks) {
+        uint64 old = valid_credits.load(MemOrder::Relaxed);
+        while (true) {
+            if (old < credits_blocks) {
+                // 回收空间
+            }
+            int desried = old - credits_blocks;
+            if (valid_credits.compare_exchange_weak(old,
+                                                    desried,
+                                                    MemOrder::AcqRel,
+                                                    MemOrder::Relaxed)) {
+                handle.reserved_credits = credits_blocks;
+                return JounralSysError::Success;
+            }
+        }
+    }
 
     //    - 结束本次 journaling，释放 credits；若当前事务所有 handle
     //    均结束，则可进入提交阶段
@@ -165,6 +223,8 @@ public:
 
 private:
 
+    uint64 estimate_bytes(uint64 credits);
+
     // 追加一个描述块 + payload 到日志（做切块/CRC/对齐/环区 wrap）
     JounralSysError append_descriptor_and_payload(
         const JournalWriteParams &p,
@@ -209,11 +269,13 @@ private:
     condition_variable      cv_need_commit;
     condition_variable      cv_commit_done;
 
-    // ---|-------------------|----
-    //    head  vaild         tail
-    atomic<uint64> head {0};
-    atomic<uint64> tail {0};
-    atomic<uint64> flushed_tail {0};
+    atomic<uint64> head;
+    atomic<uint64> tail;
+    atomic<uint64> valid_credits;
+    atomic<uint64> capacity;
+
+    atomic<uint64> flushed_tail;
+
     atomic<uint32> sync_goal {0};
 
     atomic<uint32> cur_tx_seq {0};  // 正在构建的事务

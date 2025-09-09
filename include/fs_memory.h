@@ -9,7 +9,13 @@
 
 FS_NAMESPACE_BEGIN
 
-using MemOrder = std::memory_order;
+namespace MemOrder {
+    constexpr std::memory_order Relaxed = std::memory_order_relaxed;
+    constexpr std::memory_order Acquire = std::memory_order_acquire;
+    constexpr std::memory_order Release = std::memory_order_release;
+    constexpr std::memory_order AcqRel  = std::memory_order_acq_rel;
+    constexpr std::memory_order SeqCst  = std::memory_order_seq_cst;
+}
 
 inline void *fs_memset(void *ptr, int value, size_t num) {
     return memset(ptr, value, num);

@@ -27,7 +27,9 @@ struct JournalSuper {
 
     be32 log_block_size;
 
+    be64 s_first;
     be64 len_blocks;
+
     be64 start_block;
 
     u8 uuid[16];
